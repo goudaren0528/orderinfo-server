@@ -1,0 +1,16 @@
+services:
+  order-notify:
+    build: .
+    container_name: order-notify
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./config.json:/app/config.json
+      - ./cookies:/app/cookies
+      # Persistent browser profile data (maps to /root/order_info_browser_data inside container)
+      - ./browser_data:/root/order_info_browser_data
+    environment:
+      - TZ=Asia/Shanghai
+    # Ensure smooth shutdown
+    stop_signal: SIGINT

@@ -1,0 +1,12 @@
+__pycache__/
+build/
+dist/
+cookies/
+*.spec
+venv/
+.env
+.DS_Store
+*.pyc
+playwright-browsers/
+order_info_browser_data/
+config.json

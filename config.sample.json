@@ -1,0 +1,17 @@
+[
+  {
+    "name": "Example Site",
+    "login_url": "https://example.com/login",
+    "username": "your_username",
+    "password": "your_password",
+    "selectors": {
+      "username_input": "#username",
+      "password_input": "#password",
+      "login_button": "#login-btn",
+      "order_menu_link": "https://example.com/orders",
+      "pending_tab_selector": "#tab-pending",
+      "pending_count_element": ".pagination-total",
+      "order_list_container": "optional_selector_for_list_container"
+    }
+  }
+]
