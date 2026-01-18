@@ -9,6 +9,7 @@ import queue
 import random
 import subprocess
 import sys
+import socket
 
 # 强制 stdout 使用行缓冲，确保 GUI 能实时获取日志
 sys.stdout.reconfigure(encoding='utf-8', line_buffering=True)
@@ -347,10 +348,10 @@ def check_orders(context_or_manager=None):
             return
 
     try:
-        for site in sites:
-            # 处理窗口事件
-            process_window_events(manager)
+        # 1. 优先尝试处理窗口事件（避免阻塞后续的长时间页面加载）
+        process_window_events(manager)
 
+        for site in sites:
             if not isinstance(site, dict):
                  print(f"警告: site 配置格式错误 (类型: {type(site)})，跳过: {site}")
                  continue
@@ -1416,6 +1417,20 @@ browser_manager = BrowserManager()
 # 共享给 Web Server 使用，以便远程控制
 shared.browser_manager = browser_manager
 
+def ensure_single_instance():
+    """确保单实例运行 (通过绑定端口)"""
+    lock_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        # 绑定一个特定的本地端口 (选择一个不常用的端口)
+        # 注意：这里绑定的是 12345，请确保没有其他重要服务使用此端口
+        # UDP 端口绑定不会影响 TCP 服务 (web_server 使用的是 TCP 5000)
+        lock_socket.bind(('127.0.0.1', 12345))
+        return lock_socket
+    except socket.error:
+        print(f"检测到程序已经在运行 (端口 12345 被占用)！")
+        print("请不要重复启动监控脚本。")
+        sys.exit(1)
+
 def run_scheduler():
     """定时任务调度"""
     print("监控脚本已启动 (Ctrl+C 停止)...")
@@ -1501,5 +1516,8 @@ def run_scheduler():
     finally:
         browser_manager.stop()
 
-if __name__ == "__main__":
+if __name__ == '__main__':
+    # 确保单实例运行
+    _instance_lock = ensure_single_instance()
+    
     run_scheduler()
