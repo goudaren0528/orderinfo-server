@@ -71,7 +71,7 @@ class App:
         self.toast = ToastNotifier() if has_toast else None
         
         self.create_widgets()
-        self.root.protocol("WM_DELETE_WINDOW", self.minimize_to_tray)
+        self.root.protocol("WM_DELETE_WINDOW", self.on_window_closing)
         
         # 初始化图标
         self.create_tray_icon()
@@ -88,9 +88,47 @@ class App:
         )
         self.icon = pystray.Icon("name", image, "租帮宝", menu)
         
+    def on_window_closing(self):
+        # 自定义关闭提示对话框
+        dialog = tk.Toplevel(self.root)
+        dialog.title("关闭提示")
+        
+        width = 300
+        height = 120
+        try:
+            x = self.root.winfo_x() + (self.root.winfo_width() // 2) - (width // 2)
+            y = self.root.winfo_y() + (self.root.winfo_height() // 2) - (height // 2)
+        except:
+            x = (self.root.winfo_screenwidth() // 2) - (width // 2)
+            y = (self.root.winfo_screenheight() // 2) - (height // 2)
+            
+        dialog.geometry(f"{width}x{height}+{x}+{y}")
+        dialog.resizable(False, False)
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        ttk.Label(dialog, text="您点击了关闭按钮，请选择：", font=("微软雅黑", 10)).pack(pady=20)
+        
+        btn_frame = ttk.Frame(dialog)
+        btn_frame.pack(fill=tk.X, padx=10)
+        
+        def do_minimize():
+            dialog.destroy()
+            self.minimize_to_tray()
+            
+        def do_exit():
+            dialog.destroy()
+            self.on_close(confirm=False)
+            
+        ttk.Button(btn_frame, text="最小化到托盘", command=do_minimize).pack(side=tk.LEFT, expand=True, padx=5)
+        ttk.Button(btn_frame, text="退出程序", command=do_exit).pack(side=tk.LEFT, expand=True, padx=5)
+        
+        # 默认关闭对话框不做任何事（或者可以默认最小化）
+        dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+
     def minimize_to_tray(self):
         self.root.withdraw()
-        if not self.icon.visible:
+        if self.icon and not self.icon.visible:
             threading.Thread(target=self.icon.run, daemon=True).start()
 
     def show_window(self, icon=None, item=None):
@@ -616,13 +654,18 @@ class App:
             self.root.after(0, lambda: self.btn_start.config(text="启动监控服务"))
             self.process = None
 
-    def on_close(self):
+    def on_close(self, confirm=True):
         if self.process and self.process.poll() is None:
-            if messagebox.askyesno("退出", "监控服务正在运行，确定要退出吗？\n(退出将停止监控)"):
+            if confirm and not messagebox.askyesno("退出", "监控服务正在运行，确定要退出吗？\n(退出将停止监控)"):
+                return
+            try:
                 self.process.terminate()
-                self.root.destroy()
-        else:
-            self.root.destroy()
+            except:
+                pass
+        
+        if self.icon:
+            self.icon.stop()
+        self.root.destroy()
 
     def show_browser(self): self._call_browser_api("show")
     def hide_browser(self): self._call_browser_api("hide")

@@ -10,3 +10,4 @@ venv/
 playwright-browsers/
 order_info_browser_data/
 config.json
+debug_config.py

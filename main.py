@@ -275,6 +275,19 @@ def handle_popups(page, site_name=""):
     except Exception as e:
         print(f"[{site_name}] 处理弹窗时出错 (非致命): {e}")
 
+def process_window_events(manager):
+    """处理窗口控制队列"""
+    try:
+        while not shared.window_control_queue.empty():
+            cmd = shared.window_control_queue.get_nowait()
+            if manager:
+                if cmd == "show":
+                    manager.move_browser_onscreen()
+                elif cmd == "hide":
+                    manager.move_browser_offscreen()
+    except Exception as e:
+        print(f"处理窗口队列出错: {e}")
+
 def check_orders(context_or_manager=None):
     """核心任务：轮询所有后台并抓取数据
     Args:
@@ -335,6 +348,13 @@ def check_orders(context_or_manager=None):
 
     try:
         for site in sites:
+            # 处理窗口事件
+            process_window_events(manager)
+
+            if not isinstance(site, dict):
+                 print(f"警告: site 配置格式错误 (类型: {type(site)})，跳过: {site}")
+                 continue
+
             page = None
             try:
                 print(f"[{site['name']}] 正在处理...")
@@ -369,24 +389,39 @@ def check_orders(context_or_manager=None):
                     # 如果 order_menu_link 不是 URL (是选择器)，那只能先去登录页或者主页
                     print(f"[{site['name']}] 访问入口页: {target_url}")
 
-                try:
-                    # 使用 domcontentloaded 以防止被无关资源（如图片、统计代码）阻塞
-                    page.goto(target_url, wait_until='domcontentloaded', timeout=30000)
-                    
-                    # 显式等待 Tab 出现，给页面加载留出时间
-                    if selectors.get('pending_tab_selector'):
-                        try:
-                            page.wait_for_selector(selectors['pending_tab_selector'], timeout=5000, state='visible')
-                        except:
-                            pass # 就算没等到，后面也会有 check_selector 的判断逻辑
-                    else:
-                        # 兼容旧逻辑，等待网络空闲
-                        try:
-                            page.wait_for_load_state('networkidle', timeout=5000)
-                        except:
-                            pass
-                except Exception as e:
-                    print(f"[{site['name']}] 页面加载超时或出错: {e}")
+                # 增加重试机制 (最多 3 次)
+                max_retries = 3
+                for attempt in range(1, max_retries + 1):
+                    try:
+                        # 使用 domcontentloaded 以防止被无关资源（如图片、统计代码）阻塞
+                        print(f"[{site['name']}] 正在加载页面 (尝试 {attempt}/{max_retries})...")
+                        page.goto(target_url, wait_until='domcontentloaded', timeout=30000)
+                        
+                        # 显式等待 Tab 出现，给页面加载留出时间
+                        if selectors.get('pending_tab_selector'):
+                            try:
+                                page.wait_for_selector(selectors['pending_tab_selector'], timeout=5000, state='visible')
+                            except:
+                                pass # 就算没等到，后面也会有 check_selector 的判断逻辑
+                        else:
+                            # 兼容旧逻辑，等待网络空闲
+                            try:
+                                page.wait_for_load_state('networkidle', timeout=5000)
+                            except:
+                                pass
+                        
+                        # 如果成功加载（没有抛出异常），跳出重试循环
+                        break
+                    except Exception as e:
+                        print(f"[{site['name']}] 页面加载第 {attempt} 次失败: {e}")
+                        if attempt < max_retries:
+                            print(f"[{site['name']}] 等待 3 秒后重试...")
+                            time.sleep(3)
+                        else:
+                            print(f"[{site['name']}] 页面加载最终失败，跳过此站点。")
+                else:
+                    # 如果循环正常结束（即没有 break），说明最终失败
+                    continue # 跳过当前 site，进入下一个 loop
 
                 # 3. 检查是否已经登录
                 # 优先使用 Tab 标签作为登录判断依据（因为它通常总是可见的，而具体数量元素可能在非激活 Tab 中被隐藏）
@@ -1297,6 +1332,28 @@ class BrowserManager:
         """重启浏览器"""
         print("正在重启浏览器...")
         self.stop()
+        
+        # 尝试杀掉占用 9222 端口的进程
+        try:
+            print("正在清理占用 9222 端口的旧浏览器进程...")
+            # Windows 命令查找端口占用
+            cmd = 'netstat -ano | findstr :9222'
+            # 使用 shell=True 执行
+            process = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            stdout, _ = process.communicate()
+            
+            if stdout:
+                lines = stdout.decode('utf-8', errors='ignore').splitlines()
+                for line in lines:
+                    parts = line.strip().split()
+                    # TCP 0.0.0.0:9222 0.0.0.0:0 LISTENING 1234
+                    if len(parts) >= 5 and 'LISTENING' in line:
+                        pid = parts[-1]
+                        print(f"发现旧浏览器进程 PID: {pid}，正在强制终止...")
+                        os.system(f"taskkill /F /PID {pid}")
+        except Exception as e:
+            print(f"清理旧进程失败 (非致命): {e}")
+
         time.sleep(2)
         self.start()
 
@@ -1455,12 +1512,24 @@ def run_scheduler():
             # 传入管理器实例，以便 check_orders 能复用页面
             check_orders(browser_manager)
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             error_str = str(e)
             print(f"执行任务时发生错误: {error_str}")
             
             # 检测是否是浏览器关闭/崩溃导致的错误
-            if "Target page, context or browser has been closed" in error_str or "Event loop is closed" in error_str:
-                print("检测到浏览器异常关闭，准备重启...")
+            error_lower = error_str.lower()
+            critical_errors = [
+                "target page, context or browser has been closed",
+                "event loop is closed",
+                "connection closed",
+                "session closed",
+                "broken pipe",
+                "connection refused"
+            ]
+            
+            if any(err in error_lower for err in critical_errors):
+                print("检测到浏览器异常关闭或连接断开，准备重启...")
                 try:
                     browser_manager.restart()
                 except Exception as restart_error:
