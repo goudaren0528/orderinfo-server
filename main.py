@@ -691,7 +691,7 @@ def check_orders(context_or_manager=None):
                         is_logged_in = True
                         print(f"[{site['name']}] 自动登录成功！")
                     else:
-                        # === 人工介入 ===
+                        # === 人工介入 (本地模式) ===
                         print(f"[{site['name']}] ⚠️ 自动登录未成功（可能需要验证码）。")
                         
                         # 尝试将浏览器移到屏幕中间方便操作
@@ -701,106 +701,25 @@ def check_orders(context_or_manager=None):
                             except:
                                 pass
                                 
-                        print(f"[{site['name']}] >>> 启动远程交互模式，等待人工介入...")
+                        print(f"[{site['name']}] >>> 等待人工手动登录 (限时 120 秒)...")
                         
-                        shared.current_site_name = site['name']
-                        shared.is_interactive_mode = True
+                        # shared.current_site_name = site['name']
+                        # shared.is_interactive_mode = True
                         
-                        from urllib.parse import quote
-                        safe_site_name = quote(site['name'])
-                        control_url = f"http://{SERVER_IP}:{SERVER_PORT}/control/{safe_site_name}"
-                        warn_msg = (
-                            f"⚠️ **{site['name']}** 需要人工介入！\n\n"
-                            f"自动登录失败，可能需要验证码。\n"
-                            f"请在 **120秒** 内通过下方链接远程处理：\n\n"
-                            f"[点击进入远程控制台]({control_url})\n\n"
-                            f"(处理完成后脚本将自动继续)"
-                        )
-                        send_wecom_notification(warn_msg, msg_type="markdown", webhook_url=get_webhook_urls(alert=True))
+                        # from urllib.parse import quote
+                        # safe_site_name = quote(site['name'])
+                        # control_url = f"http://{SERVER_IP}:{SERVER_PORT}/control/{safe_site_name}"
+                        # warn_msg = (
+                        #     f"⚠️ **{site['name']}** 需要人工介入！\n\n"
+                        #     f"自动登录失败，可能需要验证码。\n"
+                        #     f"请在 **120秒** 内通过下方链接远程处理：\n\n"
+                        #     f"[点击进入远程控制台]({control_url})\n\n"
+                        #     f"(处理完成后脚本将自动继续)"
+                        # )
+                        # send_wecom_notification(warn_msg, msg_type="markdown", webhook_url=get_webhook_urls(alert=True))
                         
                         start_wait = time.time()
                         while time.time() - start_wait < 120:
-                            try:
-                                screenshot = page.screenshot(type='jpeg', quality=50)
-                                shared.set_screenshot(screenshot)
-                            except Exception as e:
-                                print(f"截图失败: {e}")
-                                if "Target page, context or browser has been closed" in str(e):
-                                    print("浏览器已关闭，退出交互模式")
-                                    break
-                                # 否则只是单次截图失败，可能页面正在刷新，继续尝试
-
-                            try:
-                                while not shared.command_queue.empty():
-                                    cmd = shared.command_queue.get_nowait()
-                                    if cmd['type'] == 'click':
-                                        # 动态获取当前页面的实际视口大小，确保坐标准确
-                                        try:
-                                            # 使用 JS 获取准确的 innerWidth/Height
-                                            vp_width = page.evaluate("window.innerWidth")
-                                            vp_height = page.evaluate("window.innerHeight")
-                                            
-                                            # 确保页面在前台
-                                            page.bring_to_front()
-                                            
-                                            x = int(cmd['x_pct'] * vp_width)
-                                            y = int(cmd['y_pct'] * vp_height)
-                                            print(f"执行点击: ({x}, {y}) [视口: {vp_width}x{vp_height}]")
-                                            page.mouse.click(x, y)
-                                        except Exception as click_err:
-                                            print(f"点击指令执行失败: {click_err}")
-                                    
-                                    elif cmd['type'] == 'type':
-                                        text = cmd['text']
-                                        print(f"输入文字: {text}")
-                                        # 确保页面在前台
-                                        page.bring_to_front()
-                                        time.sleep(0.5) 
-                                        page.keyboard.type(text, delay=100)
-                                        
-                                    elif cmd['type'] == 'press':
-                                        key = cmd['key']
-                                        print(f"按键: {key}")
-                                        page.bring_to_front()
-                                        page.keyboard.press(key)
-                                        
-                                    elif cmd['type'] == 'refresh':
-                                        print(f"执行页面刷新...")
-                                        page.bring_to_front()
-                                        page.reload()
-                                        page.wait_for_load_state('domcontentloaded')
-
-                                    elif cmd['type'] == 'drag':
-                                        try:
-                                            vp_width = page.evaluate("window.innerWidth")
-                                            vp_height = page.evaluate("window.innerHeight")
-                                            
-                                            page.bring_to_front()
-                                            
-                                            start_x = int(cmd['start_x_pct'] * vp_width)
-                                            start_y = int(cmd['start_y_pct'] * vp_height)
-                                            end_x = int(cmd['end_x_pct'] * vp_width)
-                                            end_y = int(cmd['end_y_pct'] * vp_height)
-                                            print(f"执行拖拽: ({start_x}, {start_y}) -> ({end_x}, {end_y})")
-                                            
-                                            # 模拟人类拖拽轨迹
-                                            page.mouse.move(start_x, start_y)
-                                            page.mouse.down()
-                                            
-                                            # 简单的平滑移动
-                                            steps = 15
-                                            for i in range(1, steps + 1):
-                                                curr_x = start_x + (end_x - start_x) * i / steps
-                                                curr_y = start_y + (end_y - start_y) * i / steps
-                                                page.mouse.move(curr_x, curr_y)
-                                                time.sleep(0.015) 
-                                            
-                                            page.mouse.up()
-                                        except Exception as drag_err:
-                                            print(f"拖拽指令执行失败: {drag_err}")
-                            except Exception as e:
-                                print(f"执行指令失败: {e}")
-
                             # 处理窗口控制队列 (在交互等待期间也要响应显示/隐藏指令)
                             try:
                                 while not shared.window_control_queue.empty():
@@ -828,7 +747,7 @@ def check_orders(context_or_manager=None):
                             
                             time.sleep(0.5)
                         
-                        shared.is_interactive_mode = False
+                        # shared.is_interactive_mode = False
                         
                         # 操作结束，将浏览器移回屏幕外
                         if manager:
@@ -1052,6 +971,12 @@ def check_orders(context_or_manager=None):
                         page.close()
                     except:
                         pass
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        print(f"检查订单过程中发生未捕获异常: {e}")
+        # 不重新抛出异常，以便继续执行后面的通知逻辑
 
     finally:
         # 如果是临时创建的 context，用完就关；如果是外部传入的，由外部管理
