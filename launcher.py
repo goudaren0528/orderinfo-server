@@ -11,11 +11,6 @@ import pystray
 from PIL import Image, ImageDraw
 import webbrowser
 import re
-try:
-    from win10toast import ToastNotifier
-    has_toast = True
-except ImportError:
-    has_toast = False
 
 CONFIG_FILE = 'config.json'
 if getattr(sys, 'frozen', False):
@@ -68,26 +63,36 @@ class App:
         self.is_stopping = False  # 标记是否为用户主动停止
         self.config = ConfigManager.load()
         self.icon = None
-        self.toast = ToastNotifier() if has_toast else None
         
         self.create_widgets()
         self.root.protocol("WM_DELETE_WINDOW", self.on_window_closing)
         
-        # 初始化图标
-        self.create_tray_icon()
+        # 初始化并启动托盘图标（常驻）
+        self.start_tray_icon()
 
-    def create_tray_icon(self):
-        # 创建一个简单的图标
+    def start_tray_icon(self):
+        # 创建图标图像
         image = Image.new('RGB', (64, 64), color=(0, 120, 215))
         d = ImageDraw.Draw(image)
         d.text((10, 10), "租", fill=(255, 255, 255))
         
+        # 定义菜单
         menu = (
-            pystray.MenuItem('显示主界面', self.show_window),
-            pystray.MenuItem('退出', self.quit_app)
+            pystray.MenuItem('显示主界面', self.show_window_from_tray),
+            pystray.MenuItem('退出', self.quit_app_from_tray)
         )
+        
         self.icon = pystray.Icon("name", image, "租帮宝", menu)
         
+        # 在独立线程中运行托盘图标
+        threading.Thread(target=self.icon.run, daemon=True).start()
+
+    def show_window_from_tray(self, icon=None, item=None):
+        self.root.after(0, self.root.deiconify)
+
+    def quit_app_from_tray(self, icon=None, item=None):
+        self.root.after(0, lambda: self.on_close(confirm=False))
+
     def on_window_closing(self):
         # 自定义关闭提示对话框
         dialog = tk.Toplevel(self.root)
@@ -114,7 +119,7 @@ class App:
         
         def do_minimize():
             dialog.destroy()
-            self.minimize_to_tray()
+            self.root.withdraw() # 隐藏窗口，图标已常驻
             
         def do_exit():
             dialog.destroy()
@@ -123,23 +128,16 @@ class App:
         ttk.Button(btn_frame, text="最小化到托盘", command=do_minimize).pack(side=tk.LEFT, expand=True, padx=5)
         ttk.Button(btn_frame, text="退出程序", command=do_exit).pack(side=tk.LEFT, expand=True, padx=5)
         
-        # 默认关闭对话框不做任何事（或者可以默认最小化）
+        # 默认关闭对话框不做任何事
         dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
 
-    def minimize_to_tray(self):
-        self.root.withdraw()
-        if self.icon and not self.icon.visible:
-            threading.Thread(target=self.icon.run, daemon=True).start()
-
-    def show_window(self, icon=None, item=None):
-        self.root.after(0, self.root.deiconify)
-        if icon:
-            icon.stop()
-
-    def quit_app(self, icon=None, item=None):
-        if icon:
-            icon.stop()
-        self.root.after(0, self.on_close)
+    def notify(self, title, message):
+        """发送系统通知（通过托盘图标）"""
+        if self.icon and self.config.get('desktop_notify', True):
+            try:
+                self.icon.notify(message, title)
+            except Exception as e:
+                print(f"通知发送失败: {e}")
 
     def create_widgets(self):
         # 使用 Notebook 实现多 Tab 布局
@@ -314,9 +312,9 @@ class App:
    - 状态栏显示服务运行状态。
 
 3. 桌面交互
-   - 点击右上角关闭按钮，程序会最小化到系统托盘（右下角图标），不会退出。
-   - 有新订单时，右下角会弹出气泡提示（需在高级设置中开启）。
-   - 右键托盘图标可彻底退出程序。
+   - 点击右上角关闭按钮，可以选择“最小化到托盘”或“退出程序”。
+   - 托盘图标（右下角）常驻运行，右键可显示主界面或退出。
+   - 有新订单或需要人工介入时，右下角会弹出气泡提示（需在高级设置中开启）。
 
 4. 浏览器辅助
    - 默认浏览器在后台运行。
@@ -461,12 +459,13 @@ class App:
             for k, e in entries.items():
                 new_data[k] = e.get()
                 if not new_data[k] and k != "password":
-                    messagebox.showwarning("警告", f"{k} 不能为空")
+                    messagebox.showerror("错误", f"{k} 不能为空")
                     return
+            
             try:
-                sel_json = txt_selectors.get('1.0', tk.END)
+                sel_json = txt_selectors.get('1.0', tk.END).strip()
                 new_data['selectors'] = json.loads(sel_json)
-            except Exception as e:
+            except json.JSONDecodeError as e:
                 messagebox.showerror("错误", f"选择器 JSON 格式错误: {e}")
                 return
 
@@ -515,6 +514,14 @@ class App:
             except Exception as e:
                 pass # 解析失败则照常打印
         
+        # === 增强功能：检测人工介入请求并通知 ===
+        # 匹配日志中的 ">>> 等待人工手动登录"
+        if ">>> 等待人工手动登录" in message:
+            # 提取站点名称 (假设格式: [站点名] >>> ...)
+            match = re.search(r'\[(.*?)\]', message)
+            site_name = match.group(1) if match else "某站点"
+            self.notify("需要人工介入", f"{site_name} 需要手动登录，请点击“显示浏览器界面”进行操作。")
+        
         self.log_text.configure(state='normal')
         self.log_text.insert(tk.END, message)
         self.log_text.see(tk.END)
@@ -546,17 +553,9 @@ class App:
             
             self.monitor_tree.insert('', 'end', values=(name, display_count, timestamp, action_text))
             
-        # 桌面通知
-        if has_orders and self.config.get('desktop_notify', True) and self.toast:
-            try:
-                self.toast.show_toast(
-                    "租帮宝 - 新订单提醒",
-                    f"检测到有待处理订单，请及时查看！",
-                    duration=10,
-                    threaded=True
-                )
-            except:
-                pass
+        # 桌面通知 (使用 Tray Icon 通知)
+        if has_orders:
+            self.notify("租帮宝 - 新订单提醒", "检测到有待处理订单，请及时查看！")
 
     def on_monitor_double_click(self, event):
         item = self.monitor_tree.selection()
@@ -640,10 +639,7 @@ class App:
             # 检测是否为异常停止
             if not self.is_stopping:
                 def show_abnormal_alert():
-                    if self.config.get('desktop_notify', True) and self.toast:
-                        try:
-                            self.toast.show_toast("租帮宝 - 警告", "监控服务异常停止！请检查日志。", duration=10, threaded=True)
-                        except: pass
+                    self.notify("租帮宝 - 警告", "监控服务异常停止！请检查日志。")
                     
                     if messagebox.askyesno("异常停止", "监控服务已异常停止。\n是否尝试重启？"):
                          self.start_process()
