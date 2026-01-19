@@ -21,6 +21,11 @@ if getattr(sys, 'frozen', False):
     # 优先检查 EXE 同级目录下的 playwright-browsers (便携模式)
     # 如果不存在，不设置环境变量，让 Playwright 使用默认系统路径 (用户本地安装的)
     base_dir = os.path.dirname(sys.executable)
+    
+    # 兼容后端 onedir 模式：如果在 backend 子目录下，向上查找一级
+    if os.path.basename(base_dir).lower() == 'backend':
+        base_dir = os.path.dirname(base_dir)
+        
     bundled_browsers = os.path.join(base_dir, 'playwright-browsers')
     if os.path.exists(bundled_browsers) and os.path.isdir(bundled_browsers):
         os.environ["PLAYWRIGHT_BROWSERS_PATH"] = bundled_browsers
@@ -50,7 +55,13 @@ SERVER_PORT = 5000
 
 def get_config_path():
     if getattr(sys, 'frozen', False):
-        return os.path.join(os.path.dirname(sys.executable), 'config.json')
+        exe_dir = os.path.dirname(sys.executable)
+        # 兼容后端 onedir 模式：如果在 backend 子目录下，优先读取上级目录的 config.json
+        if os.path.basename(exe_dir).lower() == 'backend':
+            parent_config = os.path.join(os.path.dirname(exe_dir), 'config.json')
+            if os.path.exists(parent_config):
+                return parent_config
+        return os.path.join(exe_dir, 'config.json')
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')
 
 def load_config():
@@ -1096,7 +1107,19 @@ class BrowserManager:
     def __init__(self):
         self.playwright = None
         self.context = None
-        self.user_data_dir = os.path.join(os.path.expanduser('~'), 'order_info_browser_data')
+        
+        # 修改 user_data_dir 路径策略
+        # 优先使用程序运行目录下的 browser_data，避免 C 盘权限或中文用户名路径问题
+        if getattr(sys, 'frozen', False):
+            base_dir = os.path.dirname(sys.executable)
+            # 兼容 backend 目录结构
+            if os.path.basename(base_dir).lower() == 'backend':
+                base_dir = os.path.dirname(base_dir)
+            self.user_data_dir = os.path.join(base_dir, 'browser_data')
+        else:
+            self.user_data_dir = os.path.join(os.getcwd(), 'browser_data')
+            
+        print(f"浏览器数据目录: {self.user_data_dir}")
         self.pages = {}  # 存储各站点的持久化页面 {site_name: page}
         self.cdp_port = 9222 # 定义 CDP 端口
 
@@ -1142,6 +1165,46 @@ class BrowserManager:
                 
         return None
 
+    def _kill_zombie_browsers(self):
+        """清理可能残留的、占用 User Data Dir 或端口的浏览器进程"""
+        print("正在检查并清理残留的浏览器进程...")
+        try:
+            # 1. 按端口清理 (即使 connect 失败，也可能处于半死状态)
+            cmd_port = 'netstat -ano | findstr :9222'
+            proc = subprocess.Popen(cmd_port, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            stdout, _ = proc.communicate()
+            
+            if stdout:
+                lines = stdout.decode('utf-8', errors='ignore').splitlines()
+                for line in lines:
+                    parts = line.strip().split()
+                    if len(parts) >= 5 and 'LISTENING' in line:
+                        pid = parts[-1]
+                        print(f"发现占用端口 9222 的进程 (PID: {pid})，正在终止...")
+                        os.system(f"taskkill /F /PID {pid} >nul 2>&1")
+
+            # 2. 按命令行参数清理 (User Data Dir)
+            # 匹配 browser_data 目录名
+            target_str = "browser_data"
+            
+            # 使用 wmic 查找 PID
+            cmd_wmic = f"wmic process where \"name='chrome.exe' and CommandLine like '%{target_str}%'\" get ProcessId"
+            
+            proc = subprocess.Popen(cmd_wmic, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            stdout, _ = proc.communicate()
+            
+            if stdout:
+                lines = stdout.decode('utf-8', errors='ignore').splitlines()
+                for line in lines:
+                    line = line.strip()
+                    if line.isdigit():
+                        pid = line
+                        print(f"发现残留浏览器进程 (PID: {pid})，正在终止...")
+                        os.system(f"taskkill /F /PID {pid} >nul 2>&1")
+                        
+        except Exception as e:
+            print(f"清理残留进程失败: {e}")
+
     def start(self):
         """启动浏览器和上下文"""
         if not self.playwright:
@@ -1167,6 +1230,9 @@ class BrowserManager:
                 except Exception as cdp_err:
                     print(f"连接现有浏览器失败 ({cdp_err})，准备启动新实例...")
                     
+                    # === 新增：启动前清理残留进程 ===
+                    self._kill_zombie_browsers()
+                    
                     # 2. 启动新的浏览器进程 (独立进程，脚本退出后不关闭)
                     print("正在启动独立浏览器进程...")
                     
@@ -1186,8 +1252,8 @@ class BrowserManager:
                         "--no-first-run",
                         "--no-default-browser-check",
                         # "--headless=new", # 禁用无头模式，防止 Cookie/Session 失效
-                        "--window-size=1920,1080", # 指定分辨率
-                        "--window-position=-2400,-2400", # 将窗口移到屏幕外，避免视觉干扰
+                        # "--window-size=1920,1080", # 暂时移除分辨率设置，排查崩溃
+                        # "--window-position=-2400,-2400", # 暂时移除位置设置，排查崩溃
                         "--disable-infobars",
                         "--disable-blink-features=AutomationControlled",
                         # "--start-maximized", # 不需要最大化
@@ -1199,20 +1265,46 @@ class BrowserManager:
                         "--disable-sync",
                         "--disable-translate",
                         "--disable-client-side-phishing-detection",
-                        "--no-service-autorun"
+                        "--no-service-autorun",
+                        # 增加稳定性参数，解决部分环境崩溃问题 (错误码 2147483651 / 0x80000003)
+                        "--no-sandbox",
+                        "--disable-gpu",
+                        "--disable-software-rasterizer",
+                        "--disable-dev-shm-usage" # 避免共享内存不足
                     ]
+                    
+                    print(f"启动命令: {' '.join(args)}")
                     
                     # 使用 subprocess.Popen 启动 (detaches from python script)
                     # 恢复显示控制台窗口 (用户反馈 cmd 窗口没关系)，并移除日志重定向以便查看
                     # creationflags=subprocess.CREATE_NEW_CONSOLE 确保它有自己的窗口 (Windows)
-                    subprocess.Popen(args, creationflags=subprocess.CREATE_NEW_CONSOLE)
+                    proc = subprocess.Popen(args, creationflags=subprocess.CREATE_NEW_CONSOLE)
                     
                     print("浏览器进程已启动，等待初始化...")
-                    time.sleep(3) # 等待浏览器启动并监听端口
                     
-                    # 3. 再次尝试连接
-                    print(f"尝试连接新启动的浏览器...")
-                    browser = self.playwright.chromium.connect_over_cdp(f"http://127.0.0.1:{self.cdp_port}")
+                    # 3. 循环尝试连接 (最多 15 秒)
+                    print(f"尝试连接新启动的浏览器 (最多等待 15 秒)...")
+                    browser = None
+                    for i in range(15):
+                        # 检查进程是否意外退出
+                        if proc.poll() is not None:
+                            print(f"[X] 浏览器进程已退出，返回码: {proc.returncode}")
+                            raise Exception("浏览器启动失败 (进程意外退出)")
+
+                        try:
+                            browser = self.playwright.chromium.connect_over_cdp(f"http://127.0.0.1:{self.cdp_port}")
+                            if browser:
+                                print(f"第 {i+1} 次尝试: 连接成功！")
+                                break
+                        except Exception as e:
+                            # 仅打印前几次的错误，避免刷屏，或者只打印点号
+                            if i < 3 or i % 5 == 0:
+                                print(f"第 {i+1} 次尝试连接失败，继续等待...")
+                            time.sleep(1)
+                    
+                    if not browser:
+                        raise Exception("浏览器启动超时或连接失败")
+                        
                     if browser.contexts:
                         self.context = browser.contexts[0]
                     else:
@@ -1259,26 +1351,8 @@ class BrowserManager:
         print("正在重启浏览器...")
         self.stop()
         
-        # 尝试杀掉占用 9222 端口的进程
-        try:
-            print("正在清理占用 9222 端口的旧浏览器进程...")
-            # Windows 命令查找端口占用
-            cmd = 'netstat -ano | findstr :9222'
-            # 使用 shell=True 执行
-            process = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            stdout, _ = process.communicate()
-            
-            if stdout:
-                lines = stdout.decode('utf-8', errors='ignore').splitlines()
-                for line in lines:
-                    parts = line.strip().split()
-                    # TCP 0.0.0.0:9222 0.0.0.0:0 LISTENING 1234
-                    if len(parts) >= 5 and 'LISTENING' in line:
-                        pid = parts[-1]
-                        print(f"发现旧浏览器进程 PID: {pid}，正在强制终止...")
-                        os.system(f"taskkill /F /PID {pid}")
-        except Exception as e:
-            print(f"清理旧进程失败 (非致命): {e}")
+        # 清理旧进程
+        self._kill_zombie_browsers()
 
         time.sleep(2)
         self.start()

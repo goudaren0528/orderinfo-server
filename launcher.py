@@ -608,6 +608,25 @@ class App:
             self.lbl_status.config(text="状态: 启动失败", foreground="red")
             self.btn_start.config(text="启动监控服务")
 
+    def read_process_output(self):
+        """读取子进程输出并更新到日志窗口"""
+        if not self.process:
+            return
+            
+        try:
+            for line in iter(self.process.stdout.readline, ''):
+                if not line: break
+                # 使用 after 在主线程更新 UI
+                self.root.after(0, lambda l=line: self.log(l))
+        except Exception as e:
+            self.root.after(0, lambda: self.log(f"\n[系统] 读取进程输出出错: {e}\n"))
+        finally:
+            # 进程自然结束（非手动停止）
+            if not self.is_stopping:
+                self.root.after(0, lambda: self.lbl_status.config(text="状态: 意外停止", foreground="red"))
+                self.root.after(0, lambda: self.btn_start.config(text="启动监控服务"))
+                self.root.after(0, lambda: self.log("\n=== 监控服务已意外停止 ===\n"))
+
     def kill_process_tree(self):
         """强制终止进程及其所有子进程"""
         if self.process:
