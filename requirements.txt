@@ -2,3 +2,5 @@ playwright==1.49.0
 schedule
 requests
 flask
+pystray
+Pillow

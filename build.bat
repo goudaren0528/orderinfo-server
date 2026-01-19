@@ -25,17 +25,22 @@ if exist "dist\OrderMonitor.exe" (
     echo [错误] 未找到 dist\OrderMonitor.exe，后端打包可能失败。
 )
 
-:: 复制配置文件 (如果不存在)
+:: 复制配置文件
 if exist "config.json" (
     copy "config.json" "%DIST_DIR%\config.json" >nul
     echo 配置文件复制成功。
 ) else (
-    echo [警告] 根目录下未找到 config.json。
+    if exist "config.sample.json" (
+        copy "config.sample.json" "%DIST_DIR%\config.json" >nul
+        echo [提示] 未找到 config.json，已使用 config.sample.json 作为默认配置。
+    ) else (
+        echo [警告] 根目录下未找到 config.json 或 config.sample.json。
+    )
 )
 
 :: 复制浏览器环境 (关键资源)
 if exist "playwright-browsers" (
-    echo 正在复制浏览器环境 (文件较多，请稍候)...
+    echo 正在复制浏览器环境 - 文件较多，请稍候...
     xcopy "playwright-browsers" "%DIST_DIR%\playwright-browsers" /E /I /Y /Q >nul
     echo 浏览器环境复制成功。
 ) else (
@@ -47,4 +52,3 @@ echo ==========================================
 echo      构建完成！
 echo      可执行文件位于: %DIST_DIR%\租帮宝_v3.exe
 echo ==========================================
-pause
