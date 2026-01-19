@@ -891,15 +891,16 @@ def check_orders(context_or_manager=None):
                         pass # 超时说明可能真没有
                         
                     if not page.is_visible(list_container):
-                         print(f"[{site['name']}] 未检测到订单列表容器，判定为无订单")
-                         results.append({
-                            "name": site['name'], 
-                            "count": 0, 
-                            "error": None,
-                            "link": site['selectors'].get('order_menu_link')
-                         })
-                         save_global_cookies(context)
-                         continue 
+                         print(f"[{site['name']}] 未检测到订单列表容器，但将尝试检查 Tab 上的数量...")
+                         # 之前逻辑是直接返回 0，现在改为继续往下走，尝试从 Tab 获取数量
+                         # results.append({
+                         #    "name": site['name'], 
+                         #    "count": 0, 
+                         #    "error": None,
+                         #    "link": site['selectors'].get('order_menu_link')
+                         # })
+                         # save_global_cookies(context)
+                         # continue  
 
                 # 5.1 点击待审核 Tab
                 if 'pending_tab_selector' in selectors and selectors['pending_tab_selector']:
