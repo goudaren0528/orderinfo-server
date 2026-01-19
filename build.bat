@@ -9,7 +9,8 @@ if exist build rmdir /s /q build
 if exist dist rmdir /s /q dist
 
 echo [2/4] 打包后端 (核心监控程序)...
-pyinstaller --noconfirm --onefile --console --name OrderMonitor main.py
+:: 使用 onedir 模式打包，避免反复解压导致的各种环境问题
+pyinstaller --noconfirm --onedir --console --name OrderMonitor main.py
 
 echo [3/4] 打包前端 (GUI启动器)...
 pyinstaller --noconfirm --onedir --windowed --name 租帮宝_v3 launcher.py
@@ -17,12 +18,14 @@ pyinstaller --noconfirm --onedir --windowed --name 租帮宝_v3 launcher.py
 echo [4/4] 组装运行环境...
 set "DIST_DIR=dist\租帮宝_v3"
 
-:: 复制后端程序到前端目录
-if exist "dist\OrderMonitor.exe" (
-    copy "dist\OrderMonitor.exe" "%DIST_DIR%\OrderMonitor.exe" >nul
-    echo 后端程序复制成功。
+:: 复制后端程序到前端目录 (onedir 结构)
+if exist "dist\OrderMonitor" (
+    echo 正在部署后端程序...
+    mkdir "%DIST_DIR%\backend" 2>nul
+    xcopy "dist\OrderMonitor" "%DIST_DIR%\backend" /E /I /Y /Q >nul
+    echo 后端程序部署成功。
 ) else (
-    echo [错误] 未找到 dist\OrderMonitor.exe，后端打包可能失败。
+    echo [错误] 未找到 dist\OrderMonitor 目录，后端打包可能失败。
 )
 
 :: 复制配置文件

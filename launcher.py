@@ -520,7 +520,8 @@ class App:
             # 提取站点名称 (假设格式: [站点名] >>> ...)
             match = re.search(r'\[(.*?)\]', message)
             site_name = match.group(1) if match else "某站点"
-            self.notify("需要人工介入", f"{site_name} 需要手动登录，请点击“显示浏览器界面”进行操作。")
+            # 切换为常驻弹窗提醒 (在主线程执行)
+            self.root.after(0, lambda: self.show_manual_intervention_dialog(site_name))
         
         self.log_text.configure(state='normal')
         self.log_text.insert(tk.END, message)
@@ -566,18 +567,6 @@ class App:
         if link:
             webbrowser.open(link)
 
-    def toggle_service(self):
-        if self.process and self.process.poll() is None:
-            if messagebox.askyesno("确认", "确定要停止监控服务吗？"):
-                self.is_stopping = True
-                self.process.terminate()
-                self.process = None
-                self.lbl_status.config(text="状态: 未运行", foreground="red")
-                self.btn_start.config(text="启动监控服务")
-                self.log("\n=== 服务已停止 ===\n")
-        else:
-            self.start_process()
-
     def start_process(self):
         self.is_stopping = False
         self.log("\n=== 正在启动监控服务... ===\n")
@@ -585,7 +574,13 @@ class App:
         self.btn_start.config(text="停止监控服务")
         
         if getattr(sys, 'frozen', False):
-            target_exe = os.path.join(os.path.dirname(sys.executable), "OrderMonitor.exe")
+            # 优先检查 backend 目录（onedir 模式）
+            base_dir = os.path.dirname(sys.executable)
+            target_exe = os.path.join(base_dir, "backend", "OrderMonitor.exe")
+            if not os.path.exists(target_exe):
+                # 回退检查同级目录（旧 onefile 模式兼容）
+                target_exe = os.path.join(base_dir, "OrderMonitor.exe")
+            
             if not os.path.exists(target_exe):
                 self.log(f"错误: 找不到核心程序 {target_exe}\n")
                 self.lbl_status.config(text="状态: 文件缺失", foreground="red")
@@ -613,13 +608,36 @@ class App:
             self.lbl_status.config(text="状态: 启动失败", foreground="red")
             self.btn_start.config(text="启动监控服务")
 
+    def kill_process_tree(self):
+        """强制终止进程及其所有子进程"""
+        if self.process:
+            pid = self.process.pid
+            try:
+                # 使用 taskkill 强制终止进程树
+                subprocess.run(['taskkill', '/F', '/T', '/PID', str(pid)], 
+                             stdout=subprocess.DEVNULL, 
+                             stderr=subprocess.DEVNULL, 
+                             creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0)
+            except Exception as e:
+                print(f"终止进程失败: {e}")
+            
+            self.process = None
+
+    def toggle_service(self):
+        if self.process and self.process.poll() is None:
+            if messagebox.askyesno("确认", "确定要停止监控服务吗？"):
+                self.is_stopping = True
+                self.kill_process_tree()
+                self.lbl_status.config(text="状态: 未运行", foreground="red")
+                self.btn_start.config(text="启动监控服务")
+                self.log("\n=== 服务已停止 ===\n")
+        else:
+            self.start_process()
+
     def restart_service(self):
         if self.process:
             self.is_stopping = True
-            try:
-                self.process.terminate()
-            except: pass
-            self.process = None
+            self.kill_process_tree()
             
         def _start():
             self.start_process()
@@ -627,41 +645,78 @@ class App:
         # 延时 1 秒确保进程完全释放
         self.root.after(1000, _start)
 
-    def read_process_output(self):
-        if not self.process: return
-        try:
-            for line in iter(self.process.stdout.readline, ''):
-                self.root.after(0, self.log, line)
-            self.process.stdout.close()
-        except Exception as e:
-            pass
-        if self.process:
-            # 检测是否为异常停止
-            if not self.is_stopping:
-                def show_abnormal_alert():
-                    self.notify("租帮宝 - 警告", "监控服务异常停止！请检查日志。")
-                    
-                    if messagebox.askyesno("异常停止", "监控服务已异常停止。\n是否尝试重启？"):
-                         self.start_process()
-
-                self.root.after(0, show_abnormal_alert)
-
-            self.root.after(0, lambda: self.lbl_status.config(text="状态: 已退出", foreground="red"))
-            self.root.after(0, lambda: self.btn_start.config(text="启动监控服务"))
-            self.process = None
-
     def on_close(self, confirm=True):
         if self.process and self.process.poll() is None:
             if confirm and not messagebox.askyesno("退出", "监控服务正在运行，确定要退出吗？\n(退出将停止监控)"):
                 return
-            try:
-                self.process.terminate()
-            except:
-                pass
+            self.kill_process_tree()
         
         if self.icon:
             self.icon.stop()
         self.root.destroy()
+
+    def show_manual_intervention_dialog(self, site_name):
+        """显示常驻的人工介入提醒弹窗"""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("⚠️ 需要人工介入")
+        width = 380
+        height = 180
+        
+        # 尝试显示在屏幕右下角 (类似气泡位置)
+        try:
+            sw = self.root.winfo_screenwidth()
+            sh = self.root.winfo_screenheight()
+            x = sw - width - 20
+            y = sh - height - 80 # 避开任务栏
+            dialog.geometry(f"{width}x{height}+{x}+{y}")
+        except:
+            dialog.geometry(f"{width}x{height}")
+            
+        dialog.resizable(False, False)
+        dialog.attributes('-topmost', True) # 置顶显示
+        
+        # 内容区域
+        content_frame = ttk.Frame(dialog, padding=20)
+        content_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # 图标/标题
+        header_frame = ttk.Frame(content_frame)
+        header_frame.pack(fill=tk.X, pady=(0, 10))
+        ttk.Label(header_frame, text="🔔", font=("Segoe UI Emoji", 20)).pack(side=tk.LEFT, padx=(0, 10))
+        
+        title_lbl = ttk.Label(header_frame, text=f"站点【{site_name}】需要协助", font=("微软雅黑", 11, "bold"), foreground="#d9534f")
+        title_lbl.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        
+        # 说明文本
+        ttk.Label(content_frame, text="检测到登录流程受阻（如验证码），请人工介入处理。\n处理完成后脚本将自动继续。", 
+                 font=("微软雅黑", 9), foreground="#666", wraplength=320).pack(fill=tk.X, pady=5)
+        
+        # 按钮区域
+        btn_frame = ttk.Frame(dialog, padding=10)
+        btn_frame.pack(fill=tk.X, side=tk.BOTTOM)
+        
+        def do_view():
+            self.show_browser()
+            dialog.destroy()
+            # 尝试激活主窗口
+            self.root.deiconify()
+            
+        def do_close():
+            dialog.destroy()
+            
+        # 样式调整
+        style = ttk.Style()
+        style.configure("Accent.TButton", foreground="blue")
+        
+        ttk.Button(btn_frame, text="立即查看处理", command=do_view, style="Accent.TButton").pack(side=tk.RIGHT, padx=5)
+        ttk.Button(btn_frame, text="稍后处理", command=do_close).pack(side=tk.RIGHT, padx=5)
+        
+        # 播放提示音 (Windows)
+        try:
+            import winsound
+            winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
+        except:
+            pass
 
     def show_browser(self): self._call_browser_api("show")
     def hide_browser(self): self._call_browser_api("hide")
