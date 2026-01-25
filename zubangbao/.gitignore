@@ -1,6 +1,7 @@
 __pycache__/
 build/
 dist/
+dist_new/
 cookies/
 *.spec
 venv/
@@ -9,6 +10,7 @@ venv/
 *.pyc
 playwright-browsers/
 order_info_browser_data/
+browser_data/
 config.json
 debug_config.py
 log

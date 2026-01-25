@@ -10,9 +10,14 @@ import random
 import subprocess
 import sys
 import socket
+from urllib.parse import urlparse
 
 # 强制 stdout 使用行缓冲，确保 GUI 能实时获取日志
-sys.stdout.reconfigure(encoding='utf-8', line_buffering=True)
+if sys.stdout is not None:
+    try:
+        sys.stdout.reconfigure(encoding='utf-8', line_buffering=True)
+    except Exception as e:
+        pass
 
 # 在导入 playwright 之前设置浏览器路径环境变量
 # 这样打包后可以读取内置的浏览器
@@ -219,6 +224,68 @@ def is_url(text):
     """判断字符串是否为URL"""
     return text and (text.startswith('http://') or text.startswith('https://'))
 
+def _extract_hostname(url: str):
+    try:
+        parsed = urlparse(url)
+        return (parsed.hostname or "").lower() or None
+    except Exception:
+        return None
+
+def clear_site_cookies_preserve_others(context, site, selectors):
+    try:
+        hosts = set()
+        login_url = site.get('login_url')
+        if login_url and is_url(login_url):
+            host = _extract_hostname(login_url)
+            if host:
+                hosts.add(host)
+
+        order_menu_link = selectors.get('order_menu_link') if selectors else None
+        if order_menu_link and is_url(order_menu_link):
+            host = _extract_hostname(order_menu_link)
+            if host:
+                hosts.add(host)
+
+        if not hosts:
+            return
+
+        all_cookies = context.cookies()
+        keep_cookies = []
+        removed_any = False
+
+        for cookie in all_cookies:
+            domain = (cookie.get('domain') or "").lstrip('.').lower()
+            if not domain:
+                keep_cookies.append(cookie)
+                continue
+
+            belongs = False
+            for host in hosts:
+                if domain == host or domain.endswith("." + host) or host.endswith("." + domain):
+                    belongs = True
+                    break
+
+            if belongs:
+                removed_any = True
+            else:
+                keep_cookies.append(cookie)
+
+        if not removed_any:
+            return
+
+        normalized_keep = []
+        for cookie in keep_cookies:
+            c = dict(cookie)
+            if c.get('expires') == -1:
+                c.pop('expires', None)
+            normalized_keep.append(c)
+
+        context.clear_cookies()
+        if normalized_keep:
+            context.add_cookies(normalized_keep)
+    except Exception:
+        return
+
 def save_global_cookies(context):
     """保存当前所有 Cookies (包括会话 Cookie) 到文件"""
     try:
@@ -320,6 +387,8 @@ def check_orders(context_or_manager=None):
 
     config = load_config()
     sites = config.get('sites', [])
+    config_keep_page_alive_all = bool(config.get('keep_page_alive_all'))
+    config_headless = bool(config.get('headless', False))
     if not sites:
         print("未找到配置，跳过本次执行")
         return
@@ -345,7 +414,7 @@ def check_orders(context_or_manager=None):
         try:
             context = local_playwright.chromium.launch_persistent_context(
                 user_data_dir=user_data_dir,
-                headless=True,
+                headless=config_headless,
                 args=[
                     '--no-first-run',
                     '--no-default-browser-check',
@@ -382,6 +451,10 @@ def check_orders(context_or_manager=None):
                     page = context.new_page()
                     
                 selectors = site['selectors']
+                if 'keep_page_alive' in site:
+                    keep_page_alive = bool(site.get('keep_page_alive'))
+                else:
+                    keep_page_alive = config_keep_page_alive_all
 
                 # 2. 尝试直接访问业务页面
                 # 策略调整：不再依赖旧的 cookie 文件判断，而是假设我们有状态，优先尝试访问业务页面。
@@ -401,39 +474,81 @@ def check_orders(context_or_manager=None):
                     # 如果 order_menu_link 不是 URL (是选择器)，那只能先去登录页或者主页
                     print(f"[{site['name']}] 访问入口页: {target_url}")
 
-                # 增加重试机制 (最多 3 次)
-                max_retries = 3
-                for attempt in range(1, max_retries + 1):
+                # 判断是否需要导航 (用户要求避免强制刷新)
+                should_navigate = True
+                if keep_page_alive:
                     try:
-                        # 使用 domcontentloaded 以防止被无关资源（如图片、统计代码）阻塞
-                        print(f"[{site['name']}] 正在加载页面 (尝试 {attempt}/{max_retries})...")
-                        page.goto(target_url, wait_until='domcontentloaded', timeout=30000)
+                        current_url = page.url
+                        # 如果当前URL包含 target_url (忽略协议头等差异) 或者已经在订单页
+                        # 简单的包含关系判断
+                        check_target = target_url.split('://')[-1] if '://' in target_url else target_url
+                        check_menu = order_menu_link.split('://')[-1] if order_menu_link and '://' in order_menu_link else (order_menu_link or "")
                         
-                        # 显式等待 Tab 出现，给页面加载留出时间
-                        if selectors.get('pending_tab_selector'):
-                            try:
-                                page.wait_for_selector(selectors['pending_tab_selector'], timeout=5000, state='visible')
-                            except:
-                                pass # 就算没等到，后面也会有 check_selector 的判断逻辑
-                        else:
-                            # 兼容旧逻辑，等待网络空闲
-                            try:
-                                page.wait_for_load_state('networkidle', timeout=5000)
-                            except:
-                                pass
-                        
-                        # 如果成功加载（没有抛出异常），跳出重试循环
-                        break
-                    except Exception as e:
-                        print(f"[{site['name']}] 页面加载第 {attempt} 次失败: {e}")
-                        if attempt < max_retries:
-                            print(f"[{site['name']}] 等待 3 秒后重试...")
-                            time.sleep(3)
-                        else:
-                            print(f"[{site['name']}] 页面加载最终失败，跳过此站点。")
+                        if (check_target in current_url) or (check_menu and check_menu in current_url):
+                            # 且当前不是登录页
+                            login_part = site['login_url'].split('://')[-1] if '://' in site['login_url'] else site['login_url']
+                            # 简单的包含检查可能不准，但对于带 path 的 login_url 应该够用
+                            # 如果 current_url 包含 login_part，说明在登录页，必须刷新或重试
+                            # 但注意：Zero-zero Enjoy 的 login_url 是 .../user/login，order 是 .../OrderList
+                            # 它们可能有公共前缀。所以我们要看 login_part 是否 *特定* 于登录页
+                            
+                            is_login_page = False
+                            if "login" in current_url.lower() or "signin" in current_url.lower():
+                                is_login_page = True
+                                
+                            if not is_login_page:
+                                print(f"[{site['name']}] 页面已在目标地址，跳过刷新 (URL: {current_url})")
+                                should_navigate = False
+                    except:
+                        pass
+
+                if should_navigate:
+                    # 增加重试机制 (最多 3 次)
+                    max_retries = 3
+                    for attempt in range(1, max_retries + 1):
+                        try:
+                            # 使用 domcontentloaded 以防止被无关资源（如图片、统计代码）阻塞
+                            print(f"[{site['name']}] 正在加载页面 (尝试 {attempt}/{max_retries})...")
+                            page.goto(target_url, wait_until='domcontentloaded', timeout=30000)
+                            
+                            # 显式等待 Tab 出现，给页面加载留出时间
+                            if selectors.get('pending_tab_selector'):
+                                try:
+                                    page.wait_for_selector(selectors['pending_tab_selector'], timeout=5000, state='visible')
+                                except:
+                                    pass # 就算没等到，后面也会有 check_selector 的判断逻辑
+                            else:
+                                # 兼容旧逻辑，等待网络空闲
+                                try:
+                                    page.wait_for_load_state('networkidle', timeout=5000)
+                                except:
+                                    pass
+                            
+                            # 如果成功加载（没有抛出异常），跳出重试循环
+                            break
+                        except Exception as e:
+                            print(f"[{site['name']}] 页面加载第 {attempt} 次失败: {e}")
+                            if attempt < max_retries:
+                                print(f"[{site['name']}] 等待 3 秒后重试...")
+                                time.sleep(3)
+                            else:
+                                print(f"[{site['name']}] 页面加载最终失败，跳过此站点。")
+                    else:
+                        # 如果循环正常结束（即没有 break），说明最终失败
+                        continue # 跳过当前 site，进入下一个 loop
                 else:
-                    # 如果循环正常结束（即没有 break），说明最终失败
-                    continue # 跳过当前 site，进入下一个 loop
+                    # 如果跳过导航，仍需刷新页面以获取最新数据 (用户提示：不刷新看不到新订单)
+                    host = _extract_hostname(page.url or "") or _extract_hostname(target_url) or ""
+                    if "llxzu.com" in host:
+                        print(f"[{site['name']}] 检测到 llxzu.com，跳过硬刷新，改为轻量等待以避免掉线")
+                        page.wait_for_timeout(1500)
+                    else:
+                        print(f"[{site['name']}] 页面已在目标地址，执行原位刷新 (Reload) 以更新数据...")
+                        try:
+                            page.reload(wait_until='domcontentloaded', timeout=30000)
+                            page.wait_for_timeout(2000)
+                        except Exception as e:
+                            print(f"[{site['name']}] 刷新失败: {e}")
 
                 # 3. 检查是否已经登录
                 # 优先使用 Tab 标签作为登录判断依据（因为它通常总是可见的，而具体数量元素可能在非激活 Tab 中被隐藏）
@@ -457,7 +572,9 @@ def check_orders(context_or_manager=None):
                     expired_text_locators = [
                         page.get_by_text("登录过期", exact=False),
                         page.get_by_text("请重新登录", exact=False),
-                        page.get_by_text("身份验证失败", exact=False)
+                        page.get_by_text("身份验证失败", exact=False),
+                        page.get_by_text("登录失效", exact=False),
+                        page.get_by_text("重新登陆", exact=False)
                     ]
                     for locator in expired_text_locators:
                         if locator.is_visible(timeout=500):
@@ -466,8 +583,7 @@ def check_orders(context_or_manager=None):
                             
                             # 强制清理 Cookie 和 Storage
                             try:
-                                client = page.context.new_cdp_session(page)
-                                client.send('Network.clearBrowserCookies')
+                                clear_site_cookies_preserve_others(page.context, site, selectors)
                                 page.evaluate("try { localStorage.clear(); sessionStorage.clear(); } catch(e) {}")
                                 print(f"[{site['name']}] 已强制清理 Cookie 和 LocalStorage")
                             except Exception as clear_err:
@@ -502,6 +618,27 @@ def check_orders(context_or_manager=None):
                     if count_selector and page.is_visible(count_selector):
                          print(f"[{site['name']}] 未找到 Tab，但找到了数量元素，判定为已登录")
                          is_logged_in = True
+                
+                # URL 兜底：对于 SPA/选择器不稳定的站点，如果仍在订单页且未出现登录框，视为已登录
+                if not is_logged_in:
+                    try:
+                        current_url = page.url or ""
+                        is_login_like = ("login" in current_url.lower() or "signin" in current_url.lower())
+                        user_input_sel = selectors.get('username_input')
+                        login_form_visible = False
+                        if user_input_sel:
+                            try:
+                                login_form_visible = page.is_visible(user_input_sel)
+                            except:
+                                login_form_visible = False
+
+                        order_menu_link = selectors.get('order_menu_link')
+                        if order_menu_link and is_url(order_menu_link):
+                            if (order_menu_link in current_url) and (not is_login_like) and (not login_form_visible):
+                                print(f"[{site['name']}] 通过 URL 判定仍在订单页，视为已登录 (URL: {current_url})")
+                                is_logged_in = True
+                    except:
+                        pass
 
                 if is_logged_in:
                     print(f"[{site['name']}] 状态: 已登录 (Cookie 有效)")
@@ -514,12 +651,6 @@ def check_orders(context_or_manager=None):
                     try:
                         # 移除全局清理逻辑，避免误伤其他站点的 Cookie
                         # context.clear_cookies() <--- 这是一个危险操作，会清除所有站点的 Cookie！
-                        
-                        # 尝试清理当前页面的 Storage (仅限当前域名)
-                        try:
-                            page.evaluate("try { localStorage.clear(); sessionStorage.clear(); } catch(e) {}")
-                        except:
-                            pass
 
                         # 只需要跳转登录页
                         print(f"[{site['name']}] 访问登录页: {site['login_url']}")
@@ -784,29 +915,36 @@ def check_orders(context_or_manager=None):
                     # 无论是否可见，都尝试先进入订单页面，确保我们在正确的页面上处理弹窗
                     # 注意：如果已经在订单页，goto 可能只会刷新，也是好事
                     if is_url(order_link):
-                        print(f"[{site['name']}] 跳转到订单页面: {order_link}")
-                        page.goto(order_link)
-                        # 等待页面加载，并检测是否被重定向到登录页
-                        try:
-                            page.wait_for_load_state('domcontentloaded')
-                            time.sleep(2)
-                            # 检查是否出现了登录框（说明 cookie 失效被重定向了）
-                            if page.is_visible(selectors['username_input']):
-                                print(f"[{site['name']}] 跳转订单页后发现回到了登录页，Cookie 已失效")
-                                
-                                # 清理当前站点的 Cookie (只清理当前域名的，避免误伤)
-                                print(f"[{site['name']}] 正在清理该站点的 Cookie...")
-                                
-                                # 使用 CDP 清理当前会话 Cookie
-                                client = page.context.new_cdp_session(page)
-                                client.send('Network.clearBrowserCookies')
-                                print(f"[{site['name']}] 已清理当前会话 Cookie")
+                        should_navigate = True
+                        if keep_page_alive:
+                            try:
+                                current_url = page.url or ""
+                                if order_link in current_url:
+                                    should_navigate = False
+                            except:
+                                pass
+                        if should_navigate:
+                            print(f"[{site['name']}] 跳转到订单页面: {order_link}")
+                            page.goto(order_link)
+                            # 等待页面加载，并检测是否被重定向到登录页
+                            try:
+                                page.wait_for_load_state('domcontentloaded')
+                                time.sleep(2)
+                                # 检查是否出现了登录框（说明 cookie 失效被重定向了）
+                                if page.is_visible(selectors['username_input']):
+                                    print(f"[{site['name']}] 跳转订单页后发现回到了登录页，Cookie 已失效")
+                                    
+                                    # 清理当前站点的 Cookie (只清理当前域名的，避免误伤)
+                                    print(f"[{site['name']}] 正在清理该站点的 Cookie...")
+                                    
+                                    clear_site_cookies_preserve_others(page.context, site, selectors)
+                                    print(f"[{site['name']}] 已清理当前会话 Cookie")
 
-                                is_logged_in = False # 标记为未登录
-                                print(f"[{site['name']}] 准备重新跳转登录页...")
-                                page.goto(site['login_url'])
-                        except:
-                            pass
+                                    is_logged_in = False # 标记为未登录
+                                    print(f"[{site['name']}] 准备重新跳转登录页...")
+                                    page.goto(site['login_url'])
+                            except:
+                                pass
                     else:
                         # 只有当不在订单页时才点击菜单
                         if not page.is_visible(selectors['pending_count_element']):
@@ -835,15 +973,22 @@ def check_orders(context_or_manager=None):
                 page_load_failed = False # 标记页面是否加载失败
                 
                 try:
-                    page.reload(wait_until='domcontentloaded', timeout=30000)
-                    # 基础等待
-                    try:
-                        page.wait_for_load_state('networkidle', timeout=5000)
-                    except:
-                        pass # 忽略 networkidle 超时，继续往下走
-                    
-                    # 强制等待 5 秒
-                    time.sleep(5)
+                    if not keep_page_alive:
+                        page.reload(wait_until='domcontentloaded', timeout=30000)
+                        # 基础等待
+                        try:
+                            page.wait_for_load_state('networkidle', timeout=5000)
+                        except:
+                            pass # 忽略 networkidle 超时，继续往下走
+                        
+                        # 强制等待 5 秒
+                        time.sleep(5)
+                    else:
+                        try:
+                            page.wait_for_load_state('domcontentloaded', timeout=15000)
+                        except:
+                            pass
+                        time.sleep(2)
                     
                     # 刷新后再次处理可能出现的弹窗
                     handle_popups(page, site_name=site['name'])
@@ -857,8 +1002,6 @@ def check_orders(context_or_manager=None):
                             page.wait_for_selector(wait_target, state='visible', timeout=15000) # 增加等待时间到15秒
                             print(f"[{site['name']}] 页面加载确认完成")
                         except Exception as wait_err:
-                            # 增加容错：如果是因为匹配到多个元素导致的超时（或者其他原因），尝试检查第一个是否可见
-                            # 某些情况下 Playwright 的 wait_for_selector 在 strict 模式下遇到多个元素会表现异常
                             is_actually_visible = False
                             try:
                                 if page.locator(wait_target).first.is_visible():
@@ -866,7 +1009,31 @@ def check_orders(context_or_manager=None):
                                     is_actually_visible = True
                             except:
                                 pass
-                                
+                            
+                            if not is_actually_visible:
+                                fallback_targets = []
+                                if selectors.get('pending_tab_selector'):
+                                    fallback_targets.append(selectors.get('pending_tab_selector'))
+                                if selectors.get('pending_count_element'):
+                                    fallback_targets.append(selectors.get('pending_count_element'))
+                                fallback_targets = [t for t in fallback_targets if t and t != wait_target]
+                                for fallback in fallback_targets:
+                                    try:
+                                        if page.locator(fallback).first.is_visible():
+                                            print(f"[{site['name']}] 等待超时但发现备选元素可见: {fallback}")
+                                            is_actually_visible = True
+                                            break
+                                    except:
+                                        continue
+                            
+                            if not is_actually_visible:
+                                try:
+                                    if page.get_by_text("待审核", exact=False).first.is_visible():
+                                        print(f"[{site['name']}] 等待超时但发现“待审核”文本可见")
+                                        is_actually_visible = True
+                                except:
+                                    pass
+
                             if not is_actually_visible:
                                 print(f"[{site['name']}] ⚠️ 等待关键元素超时: {wait_err}")
                                 page_load_failed = True # 标记失败
@@ -981,7 +1148,8 @@ def check_orders(context_or_manager=None):
                 # BrowserManager 会在下次 get_page 时发现页面已关闭并自动创建新页面
                 if page:
                     try:
-                        page.close()
+                        if not manager or not keep_page_alive:
+                            page.close()
                     except:
                         pass
 
@@ -1229,7 +1397,9 @@ class BrowserManager:
                         self.context = browser.new_context()
                     print("成功连接到现有浏览器！")
                 except Exception as cdp_err:
-                    print(f"连接现有浏览器失败 ({cdp_err})，准备启动新实例...")
+                    print(f"连接现有浏览器失败: {cdp_err}")
+                    print("这可能是因为现有浏览器未开启远程调试端口(9222)，或者处于无响应状态。")
+                    print("准备清理残留进程并启动新实例...")
                     
                     # === 新增：启动前清理残留进程 ===
                     self._kill_zombie_browsers()
@@ -1244,6 +1414,11 @@ class BrowserManager:
                     if not executable_path:
                         raise FileNotFoundError("未找到可用的浏览器 (内置或系统)。请确保 playwright-browsers 目录存在或已安装 Chrome。")
                     
+                    try:
+                        headless = bool(load_config().get('headless', False))
+                    except:
+                        headless = False
+
                     # 构造启动命令
                     args = [
                         executable_path,
@@ -1252,7 +1427,6 @@ class BrowserManager:
                         "--remote-debugging-address=127.0.0.1",
                         "--no-first-run",
                         "--no-default-browser-check",
-                        # "--headless=new", # 禁用无头模式，防止 Cookie/Session 失效
                         # "--window-size=1920,1080", # 暂时移除分辨率设置，排查崩溃
                         # "--window-position=-2400,-2400", # 暂时移除位置设置，排查崩溃
                         "--disable-infobars",
@@ -1274,12 +1448,21 @@ class BrowserManager:
                         "--disable-dev-shm-usage" # 避免共享内存不足
                     ]
                     
+                    if headless:
+                        args.append("--headless=new")
+                    
                     print(f"启动命令: {' '.join(args)}")
                     
                     # 使用 subprocess.Popen 启动 (detaches from python script)
                     # 恢复显示控制台窗口 (用户反馈 cmd 窗口没关系)，并移除日志重定向以便查看
-                    # creationflags=subprocess.CREATE_NEW_CONSOLE 确保它有自己的窗口 (Windows)
-                    proc = subprocess.Popen(args, creationflags=subprocess.CREATE_NEW_CONSOLE)
+                    # 使用 DETACHED_PROCESS (0x00000008) 替代 CREATE_NEW_CONSOLE
+                    # 注意：这两个标志不能同时使用，否则会报 [WinError 87] 参数错误
+                    # DETACHED_PROCESS 已经隐含了不继承父控制台，且对于 GUI 程序 (Chrome) 不会影响窗口显示
+                    flags = 0
+                    if sys.platform == 'win32':
+                        flags = 0x00000008 # DETACHED_PROCESS
+
+                    proc = subprocess.Popen(args, creationflags=flags)
                     
                     print("浏览器进程已启动，等待初始化...")
                     
@@ -1310,9 +1493,39 @@ class BrowserManager:
                         self.context = browser.contexts[0]
                     else:
                         self.context = browser.new_context()
+
+                    # 注入反爬虫/反检测脚本 (Stealth JS)
+                    try:
+                        stealth_js = """
+                            try {
+                                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                            } catch (e) {}
+                            try {
+                                if (!window.chrome) { window.chrome = {}; }
+                                if (!window.chrome.runtime) { window.chrome.runtime = {}; }
+                            } catch (e) {}
+                            try {
+                                const originalQuery = window.navigator.permissions.query;
+                                window.navigator.permissions.query = (parameters) => (
+                                    parameters.name === 'notifications' ?
+                                        Promise.resolve({ state: Notification.permission }) :
+                                        originalQuery(parameters)
+                                );
+                            } catch (e) {}
+                        """
+                        self.context.add_init_script(stealth_js)
+                        print("已注入反检测脚本 (Stealth JS)")
+                    except Exception as e:
+                        print(f"注入反检测脚本失败: {e}")
+
                     print("浏览器启动并连接成功。")
 
                 load_global_cookies(self.context)
+                try:
+                    if not bool(load_config().get('headless', False)):
+                        self.move_browser_offscreen()
+                except:
+                    pass
             except Exception as e:
                 print(f"[X] 启动/连接浏览器失败: {e}")
                 self.stop()
@@ -1410,6 +1623,31 @@ class BrowserManager:
             
         return page
 
+    def perform_heartbeat(self):
+        """执行随机心跳，模拟用户活跃"""
+        if not self.pages:
+            return
+        
+        # print("[Heartbeat] 执行随机活跃心跳...")
+        for site_name, page in list(self.pages.items()):
+            try:
+                if not page or page.is_closed():
+                    continue
+                
+                # 随机动作: 1=滚动, 2=鼠标微动, 3=获取标题
+                action = random.randint(1, 3)
+                if action == 1:
+                    # 极微小的滚动，几乎不可见
+                    page.evaluate("window.scrollBy(0, 1); setTimeout(() => window.scrollBy(0, -1), 100);")
+                elif action == 2:
+                    # 移动鼠标到随机位置 (安全区域)
+                    page.mouse.move(random.randint(100, 500), random.randint(100, 500))
+                else:
+                    # 访问属性
+                    _ = page.title()
+            except:
+                pass
+
     def set_window_position(self, left, top):
         """通过 CDP 控制浏览器窗口位置"""
         try:
@@ -1481,7 +1719,7 @@ class BrowserManager:
     def move_browser_offscreen(self):
         """将浏览器移出屏幕"""
         if threading.current_thread() is threading.main_thread():
-            self.set_window_position(-2400, -2400)
+            self.set_window_position(-4800, -4800)
         else:
             print("非主线程调用 move_browser_offscreen，已加入队列")
             shared.window_control_queue.put("hide")
@@ -1570,9 +1808,24 @@ def run_scheduler():
     print(f"任务执行间隔: {interval} 秒")
     schedule.every(interval).seconds.do(safe_check_orders)
     
+    # 心跳控制变量
+    last_heartbeat_time = time.time()
+    next_heartbeat_interval = random.randint(30, 90)
+
     try:
         while True:
             schedule.run_pending()
+            
+            # 随机心跳检测 (在等待期间保持活跃)
+            current_time = time.time()
+            if current_time - last_heartbeat_time > next_heartbeat_interval:
+                try:
+                    browser_manager.perform_heartbeat()
+                except Exception as e:
+                    print(f"心跳执行出错: {e}")
+                
+                last_heartbeat_time = current_time
+                next_heartbeat_interval = random.randint(30, 90)
             
             # 处理浏览器窗口控制队列
             try:

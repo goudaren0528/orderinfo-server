@@ -246,12 +246,15 @@ class App:
         self.desktop_notify_var = tk.BooleanVar(value=self.config.get('desktop_notify', True))
         ttk.Checkbutton(param_frame, text="开启桌面气泡通知", variable=self.desktop_notify_var).grid(row=1, column=0, columnspan=2, padx=5, pady=5, sticky='w')
 
+        self.headless_var = tk.BooleanVar(value=self.config.get('headless', False))
+        ttk.Checkbutton(param_frame, text="无头模式 (不显示浏览器窗口)", variable=self.headless_var).grid(row=2, column=0, columnspan=2, padx=5, pady=5, sticky='w')
+
         # 夜间模式配置
         self.night_mode_var = tk.BooleanVar(value=self.config.get('night_mode', False))
-        ttk.Checkbutton(param_frame, text="开启夜间免打扰模式", variable=self.night_mode_var).grid(row=2, column=0, columnspan=2, padx=5, pady=5, sticky='w')
+        ttk.Checkbutton(param_frame, text="开启夜间免打扰模式", variable=self.night_mode_var).grid(row=3, column=0, columnspan=2, padx=5, pady=5, sticky='w')
 
         night_frame = ttk.Frame(param_frame)
-        night_frame.grid(row=3, column=0, columnspan=3, padx=5, sticky='w')
+        night_frame.grid(row=4, column=0, columnspan=3, padx=5, sticky='w')
         
         ttk.Label(night_frame, text="静默时段 (小时):").pack(side=tk.LEFT)
         
@@ -265,7 +268,7 @@ class App:
         
         ttk.Label(night_frame, text="(结束小时不含)").pack(side=tk.LEFT)
         
-        ttk.Button(param_frame, text="保存参数", command=self.save_settings).grid(row=0, column=3, rowspan=4, padx=20)
+        ttk.Button(param_frame, text="保存参数", command=self.save_settings).grid(row=0, column=3, rowspan=5, padx=20)
 
         # 2. 企微 Webhook
         wecom_frame = ttk.LabelFrame(parent, text="企业微信通知配置", padding=10)
@@ -357,6 +360,7 @@ class App:
             
             self.config['interval'] = val
             self.config['desktop_notify'] = self.desktop_notify_var.get()
+            self.config['headless'] = self.headless_var.get()
             
             # 保存夜间模式设置
             self.config['night_mode'] = self.night_mode_var.get()
