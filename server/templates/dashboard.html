@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>租帮宝授权管理后台</title>
+    <link href="https://cdn.bootcdn.net/ajax/libs/twitter-bootstrap/5.3.1/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdn.bootcdn.net/ajax/libs/font-awesome/6.4.2/css/all.min.css" rel="stylesheet">
+</head>
+<body>
+    <nav class="navbar navbar-dark bg-dark mb-4">
+        <div class="container">
+            <span class="navbar-brand mb-0 h1">租帮宝授权管理系统</span>
+            <a href="{{ url_for('logout') }}" class="btn btn-outline-light btn-sm">退出登录</a>
+        </div>
+    </nav>
+
+    <div class="container">
+        {% with messages = get_flashed_messages(with_categories=true) %}
+          {% if messages %}
+            {% for category, message in messages %}
+              <div class="alert alert-{{ category }} alert-dismissible fade show" role="alert">
+                {{ message }}
+                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+              </div>
+            {% endfor %}
+          {% endif %}
+        {% endwith %}
+
+        <div class="row">
+            <!-- 生成授权码卡片 -->
+            <div class="col-md-4 mb-4">
+                <div class="card h-100">
+                    <div class="card-header bg-primary text-white">
+                        <i class="fas fa-plus-circle me-2"></i>生成新授权码
+                    </div>
+                    <div class="card-body">
+                        <form action="{{ url_for('generate_license_view') }}" method="POST">
+                            <div class="mb-3">
+                                <label class="form-label">有效期 (天)</label>
+                                <input type="number" name="days" class="form-control" value="365" min="1">
+                            </div>
+                            <div class="mb-3">
+                                <label class="form-label">最大设备数</label>
+                                <input type="number" name="max_devices" class="form-control" value="1" min="1">
+                            </div>
+                            <div class="mb-3">
+                                <label class="form-label">自定义授权码 (可选)</label>
+                                <input type="text" name="code" class="form-control" placeholder="留空自动生成">
+                            </div>
+                            <button type="submit" class="btn btn-primary w-100">生成授权</button>
+                        </form>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 统计信息 -->
+            <div class="col-md-8 mb-4">
+                <div class="row">
+                    <div class="col-md-6 mb-3">
+                        <div class="card bg-success text-white h-100">
+                            <div class="card-body text-center">
+                                <h5 class="card-title">总授权数</h5>
+                                <h2 class="display-4">{{ total_licenses }}</h2>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-6 mb-3">
+                        <div class="card bg-info text-white h-100">
+                            <div class="card-body text-center">
+                                <h5 class="card-title">在线设备数</h5>
+                                <h2 class="display-4">{{ total_devices }}</h2>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 授权列表 -->
+        <div class="card">
+            <div class="card-header">
+                <i class="fas fa-list me-2"></i>授权列表
+            </div>
+            <div class="card-body">
+                <div class="table-responsive">
+                    <table class="table table-striped table-hover">
+                        <thead>
+                            <tr>
+                                <th>授权码</th>
+                                <th>设备数 (在线/最大)</th>
+                                <th>有效期至</th>
+                                <th>状态</th>
+                                <th>创建时间</th>
+                                <th>操作</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for license in licenses %}
+                            <tr>
+                                <td>
+                                    <code>{{ license.code }}</code>
+                                    <button class="btn btn-sm btn-link text-decoration-none copy-btn" data-clipboard-text="{{ license.code }}" title="复制">
+                                        <i class="far fa-copy"></i>
+                                    </button>
+                                </td>
+                                <td>
+                                    <span class="badge bg-{{ 'success' if license.active_devices_count < license.max_devices else 'warning' }}">
+                                        {{ license.active_devices_count }} / {{ license.max_devices }}
+                                    </span>
+                                </td>
+                                <td>{{ license.expire_date.strftime('%Y-%m-%d') }}</td>
+                                <td>
+                                    {% if license.expire_date < now %}
+                                        <span class="badge bg-danger">已过期</span>
+                                    {% else %}
+                                        <span class="badge bg-success">正常</span>
+                                    {% endif %}
+                                </td>
+                                <td class="text-muted small">{{ license.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
+                                <td>
+                                    <form action="{{ url_for('delete_license', code=license.code) }}" method="POST" onsubmit="return confirm('确定要删除此授权码吗？删除后用户将无法使用！');" style="display:inline;">
+                                        <button type="submit" class="btn btn-danger btn-sm"><i class="fas fa-trash"></i></button>
+                                    </form>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.bootcdn.net/ajax/libs/clipboard.js/2.0.11/clipboard.min.js"></script>
+    <script src="https://cdn.bootcdn.net/ajax/libs/twitter-bootstrap/5.3.1/js/bootstrap.bundle.min.js"></script>
+    <script>
+        var clipboard = new ClipboardJS('.copy-btn', {
+            text: function(trigger) {
+                return trigger.getAttribute('data-clipboard-text');
+            }
+        });
+        clipboard.on('success', function(e) {
+            alert('复制成功: ' + e.text);
+            e.clearSelection();
+        });
+    </script>
+</body>
+</html>

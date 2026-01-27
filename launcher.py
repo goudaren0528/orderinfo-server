@@ -11,6 +11,7 @@ import pystray
 from PIL import Image, ImageDraw
 import webbrowser
 import re
+from auth import auth_manager
 
 CONFIG_FILE = 'config.json'
 if getattr(sys, 'frozen', False):
@@ -70,6 +71,21 @@ class App:
         
         # 初始化并启动托盘图标（常驻）
         self.start_tray_icon()
+        
+        # 启动授权心跳
+        self.start_heartbeat()
+
+    def start_heartbeat(self):
+        def _loop():
+            while not self.is_stopping:
+                time.sleep(300) # 5分钟心跳一次
+                success, msg = auth_manager.heartbeat()
+                if not success:
+                    self.root.after(0, lambda: messagebox.showwarning("授权警告", f"授权验证失败: {msg}\n程序即将退出"))
+                    # 给用户一点时间看提示
+                    self.root.after(3000, lambda: self.on_close(confirm=False))
+                    break
+        threading.Thread(target=_loop, daemon=True).start()
 
     def start_tray_icon(self):
         # 创建图标图像
@@ -1040,5 +1056,40 @@ class App:
 
 if __name__ == '__main__':
     root = tk.Tk()
+    
+    # --- 授权验证开始 ---
+    root.withdraw() # 先隐藏主窗口
+    
+    # 1. 自动尝试加载本地授权并验证
+    code = auth_manager.load_license()
+    success = False
+    
+    if code:
+        # 有本地存档，尝试激活验证（确保未过期且未被挤下线）
+        try:
+            success, data = auth_manager.activate(code)
+        except:
+            success = False
+    
+    if not success:
+        # 需要用户输入
+        while True:
+            # 弹窗提示输入
+            code = simpledialog.askstring("软件激活", "请输入授权码进行激活：\n(未激活或授权已过期)", parent=root)
+            if not code:
+                sys.exit() # 用户取消或关闭窗口，直接退出程序
+            
+            code = code.strip()
+            success, data = auth_manager.activate(code)
+            if success:
+                expire = data.get('expire_date', '未知')
+                messagebox.showinfo("激活成功", f"授权激活成功！\n有效期至: {expire}", parent=root)
+                break
+            else:
+                messagebox.showerror("激活失败", f"错误信息: {data}", parent=root)
+    
+    root.deiconify() # 验证通过，显示主窗口
+    # --- 授权验证结束 ---
+
     app = App(root)
     root.mainloop()
