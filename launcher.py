@@ -63,6 +63,7 @@ class App:
         self.is_stopping = False  # 标记是否为用户主动停止
         self.config = ConfigManager.load()
         self.icon = None
+        self.order_notify_dialog = None
         
         self.create_widgets()
         self.root.protocol("WM_DELETE_WINDOW", self.on_window_closing)
@@ -223,6 +224,7 @@ class App:
         
         self.tree.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.tree.bind('<Double-1>', self.edit_site)
         
         btn_frame = ttk.Frame(parent, padding=5)
         btn_frame.pack(side=tk.BOTTOM, fill=tk.X)
@@ -375,6 +377,11 @@ class App:
             
             ConfigManager.save(self.config)
             
+            # 重新加载配置，确保内存中的数据也是最新的（虽然上面 self.config 已经是新的了，但为了保险起见）
+            self.config = ConfigManager.load()
+            self.refresh_site_list()
+            self.refresh_webhook_lists()
+
             if self.process and self.process.poll() is None:
                 if messagebox.askyesno("提示", "配置已保存。是否立即重启监控服务以生效？"):
                      self.restart_service()
@@ -414,11 +421,30 @@ class App:
     def add_site(self):
         self.open_site_editor()
 
-    def edit_site(self):
-        sel = self.tree.selection()
-        if not sel: return
-        item = self.tree.item(sel[0])
-        name = item['values'][0]
+    def edit_site(self, event=None):
+        item_id = None
+        if event is not None:
+            try:
+                item_id = self.tree.identify_row(event.y)
+            except Exception:
+                item_id = None
+        if not item_id:
+            sel = self.tree.selection()
+            if not sel:
+                return
+            item_id = sel[0]
+        item = self.tree.item(item_id)
+        values = item.get('values') or []
+        if not values:
+            return
+        name = values[0]
+        
+        # 在打开编辑器之前，强制重新加载一次配置，确保获取的是最新的（包括后台自动更新的选择器）
+        try:
+            self.config = ConfigManager.load()
+        except:
+            pass
+
         site_conf = next((s for s in self.config['sites'] if s['name'] == name), None)
         if site_conf:
             self.open_site_editor(site_conf)
@@ -447,16 +473,44 @@ class App:
             if site_data: entry.insert(0, site_data.get(key, ""))
             entries[key] = entry
             row += 1
+
+        # 订单页地址
+        ttk.Label(edit_win, text="订单页地址").grid(row=row, column=0, padx=10, pady=5, sticky='e')
+        order_url_entry = ttk.Entry(edit_win, width=50)
+        order_url_entry.grid(row=row, column=1, padx=10, pady=5)
+        
+        # 安全获取 selectors 数据
+        selectors_data = {}
+        if site_data:
+            selectors_data = site_data.get('selectors') or {}
+            if not isinstance(selectors_data, dict):
+                selectors_data = {}
+
+        try:
+            order_url_entry.insert(0, selectors_data.get('order_menu_link', ""))
+        except Exception as e:
+            print(f"Error setting order url: {e}")
+        row += 1
             
+        # 选择器 JSON
         ttk.Label(edit_win, text="选择器配置 (JSON)").grid(row=row, column=0, padx=10, pady=5, sticky='ne')
         txt_selectors = scrolledtext.ScrolledText(edit_win, width=50, height=15)
         txt_selectors.grid(row=row, column=1, padx=10, pady=5)
         
-        default_selectors = {"username_input": "", "password_input": "", "login_button": "", "order_menu_link": "", "pending_tab_selector": "", "pending_count_element": ""}
-        if site_data:
-            txt_selectors.insert('1.0', json.dumps(site_data.get('selectors', {}), indent=2, ensure_ascii=False))
-        else:
-            txt_selectors.insert('1.0', json.dumps(default_selectors, indent=2, ensure_ascii=False))
+        default_selectors = {"username_input": "", "password_input": "", "login_button": "", "pending_tab_selector": "", "pending_count_element": ""}
+        
+        try:
+            current_selectors = selectors_data if selectors_data else default_selectors
+            # 浅拷贝一份用于显示，避免修改原始数据
+            display_selectors = current_selectors.copy()
+            # 从显示中移除 order_menu_link，因为已有独立输入框
+            if 'order_menu_link' in display_selectors:
+                del display_selectors['order_menu_link']
+                
+            txt_selectors.insert('1.0', json.dumps(display_selectors, indent=2, ensure_ascii=False))
+        except Exception as e:
+            txt_selectors.insert('1.0', "{}")
+            messagebox.showerror("错误", f"加载选择器配置失败: {e}")
 
         def save():
             new_data = {}
@@ -468,10 +522,32 @@ class App:
             
             try:
                 sel_json = txt_selectors.get('1.0', tk.END).strip()
-                new_data['selectors'] = json.loads(sel_json)
+                # 兼容性处理：如果用户没有输入JSON，默认给空字典
+                if not sel_json:
+                    sel_json = "{}"
+                # strict=False 允许字符串中包含控制字符（如换行符）
+                new_data['selectors'] = json.loads(sel_json, strict=False)
             except json.JSONDecodeError as e:
-                messagebox.showerror("错误", f"选择器 JSON 格式错误: {e}")
+                # 尝试更友好的错误提示
+                err_msg = str(e)
+                if "Expecting property name enclosed in double quotes" in err_msg:
+                    err_msg += "\n\n提示：JSON 的键必须用双引号括起来，不能用单引号。"
+                elif "Invalid control character" in err_msg:
+                    err_msg += "\n\n提示：字符串中可能包含了未转义的换行符或特殊字符。已尝试放宽检查但仍失败。"
+                
+                messagebox.showerror("错误", f"选择器 JSON 格式错误:\n{err_msg}")
                 return
+            
+            # 将订单页地址同步到 selectors 中
+            order_url_val = order_url_entry.get().strip()
+            if order_url_val:
+                new_data['selectors']['order_menu_link'] = order_url_val
+            elif 'order_menu_link' in new_data['selectors']:
+                # 如果输入框为空，但 JSON 里有，是否要清除？
+                # 这里假设输入框为空表示不强制覆盖，或者视为清空
+                # 但为了避免误操作，如果输入框为空，而JSON里有值，可能是用户没填输入框
+                # 既然是双向绑定，输入框的值应该优先
+                new_data['selectors']['order_menu_link'] = ""
 
             if site_data:
                 # 检查是否修改了账号密码
@@ -514,10 +590,36 @@ class App:
                 json_str = message.replace("DATA_UPDATE:", "", 1)
                 data_pkg = json.loads(json_str)
                 self.update_monitor_data(data_pkg)
+                
+                # 在接收到后端数据更新时，也检查一下配置是否有变化（比如后端更新了选择器）
+                # 注意：频繁读取 IO 可能会有性能影响，但考虑到更新频率不高（60秒一次），是可以接受的
+                # 为了防止 UI 闪烁，我们只在数据真正变化时更新 UI
+                try:
+                    new_config = ConfigManager.load()
+                    # 简单比较 sites 的长度或特定字段，这里做全量比较
+                    # 注意：直接比较 dict 可能会因为顺序不同而不等，但 json load 出来的通常顺序一致
+                    # 为避免干扰，我们只在后端更新了 selector 时才需要刷新
+                    # 这里简化逻辑：每次收到数据更新，都静默重新加载一次 config 到内存
+                    # 这样下次点击“编辑站点”时，看到的就是最新的
+                    self.config = new_config
+                    # 不主动调用 refresh_site_list()，以免打断用户当前操作（如正在选行）
+                except:
+                    pass
+                
                 return
             except Exception as e:
                 pass # 解析失败则照常打印
         
+        # === 增强功能：检测配置变更通知 ===
+        # 当后端打印 "选择器已写回配置" 时，说明本地 config.json 已被修改
+        # 此时应立即重新加载内存中的配置，以便用户打开编辑窗口时能看到最新数据
+        if "选择器已写回配置" in message:
+            try:
+                # print("检测到配置文件变更，正在刷新 UI 内存配置...")
+                self.config = ConfigManager.load()
+            except:
+                pass
+
         # === 增强功能：检测人工介入请求并通知 ===
         # 匹配日志中的 ">>> 等待人工手动登录"
         if ">>> 等待人工手动登录" in message:
@@ -560,7 +662,129 @@ class App:
             
         # 桌面通知 (使用 Tray Icon 通知)
         if has_orders:
-            self.notify("租帮宝 - 新订单提醒", "检测到有待处理订单，请及时查看！")
+            # 生成详细的通知消息
+            notify_items = []
+            for res in results:
+                count = res.get('count', 0)
+                if count and count > 0:
+                    notify_items.append(f"{res.get('name')}: {count}单")
+            
+            notify_msg = "检测到有待处理订单：\n" + "\n".join(notify_items) if notify_items else "检测到有待处理订单，请及时查看！"
+            
+            self.notify("租帮宝 - 新订单提醒", notify_msg)
+            self.show_order_notification(results, timestamp)
+
+    def show_order_notification(self, results, timestamp):
+        items = []
+        for res in results:
+            error = res.get('error')
+            count = res.get('count', 0)
+            if error:
+                continue
+            if count and count > 0:
+                items.append(f"{res.get('name')}: {count} 单")
+        if not items:
+            return
+
+        if self.order_notify_dialog and self.order_notify_dialog.winfo_exists():
+            try:
+                self.order_notify_dialog.destroy()
+            except:
+                pass
+
+        dialog = tk.Toplevel(self.root)
+        self.order_notify_dialog = dialog
+        dialog.title("🔔 新订单提醒")
+        width = 380
+        height = 220
+
+        try:
+            sw = self.root.winfo_screenwidth()
+            sh = self.root.winfo_screenheight()
+            x = sw - width - 20
+            y = sh - height - 80
+            dialog.geometry(f"{width}x{height}+{x}+{y}")
+        except:
+            dialog.geometry(f"{width}x{height}")
+
+        dialog.resizable(False, False)
+        dialog.attributes('-topmost', True)
+
+        content_frame = ttk.Frame(dialog, padding=20)
+        content_frame.pack(fill=tk.BOTH, expand=True)
+
+        header_frame = ttk.Frame(content_frame)
+        header_frame.pack(fill=tk.X, pady=(0, 10))
+        icon_lbl = ttk.Label(header_frame, text="🧾", font=("Segoe UI Emoji", 20))
+        icon_lbl.pack(side=tk.LEFT, padx=(0, 10))
+        title_lbl = ttk.Label(header_frame, text="发现待处理订单", font=("微软雅黑", 11, "bold"), foreground="#d9534f")
+        title_lbl.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        summary = "\n".join(items)
+        summary_lbl = ttk.Label(content_frame, text=summary, font=("微软雅黑", 9), foreground="#333", wraplength=320)
+        summary_lbl.pack(fill=tk.X, pady=(0, 8))
+        time_lbl = ttk.Label(content_frame, text=f"更新时间：{timestamp}", font=("微软雅黑", 9), foreground="#999")
+        time_lbl.pack(fill=tk.X)
+
+        btn_frame = ttk.Frame(dialog, padding=10)
+        btn_frame.pack(fill=tk.X, side=tk.BOTTOM)
+
+        auto_close_id = {"value": None}
+        def schedule_auto_close():
+            try:
+                if auto_close_id["value"] is not None:
+                    self.root.after_cancel(auto_close_id["value"])
+            except:
+                pass
+            auto_close_id["value"] = self.root.after(60000, do_close)
+        
+        def do_view():
+            try:
+                if auto_close_id["value"] is not None:
+                    self.root.after_cancel(auto_close_id["value"])
+                dialog.destroy()
+            except:
+                pass
+            try:
+                self.root.deiconify()
+                self.root.lift()
+                self.root.focus_force()
+                self.notebook.select(self.monitor_tab)
+            except:
+                pass
+
+        def do_close():
+            try:
+                if auto_close_id["value"] is not None:
+                    self.root.after_cancel(auto_close_id["value"])
+                dialog.destroy()
+            except:
+                pass
+
+        style = ttk.Style()
+        style.configure("Accent.TButton", foreground="blue")
+
+        ttk.Button(btn_frame, text="去处理", command=do_view, style="Accent.TButton").pack(side=tk.RIGHT, padx=5)
+        ttk.Button(btn_frame, text="关闭", command=do_close).pack(side=tk.RIGHT, padx=5)
+        
+        # 绑定点击事件到整个弹窗区域，方便快速处理
+        for widget in [content_frame, header_frame, icon_lbl, title_lbl, summary_lbl, time_lbl]:
+            try:
+                widget.bind("<Button-1>", lambda e: do_view())
+                widget.configure(cursor="hand2")
+            except:
+                pass
+
+        def on_dialog_close():
+            try:
+                if auto_close_id["value"] is not None:
+                    self.root.after_cancel(auto_close_id["value"])
+                dialog.destroy()
+            except:
+                pass
+
+        dialog.protocol("WM_DELETE_WINDOW", on_dialog_close)
+        schedule_auto_close()
 
     def on_monitor_double_click(self, event):
         item = self.monitor_tree.selection()
@@ -714,18 +938,72 @@ class App:
         ttk.Label(content_frame, text="检测到登录流程受阻（如验证码），请人工介入处理。\n处理完成后脚本将自动继续。", 
                  font=("微软雅黑", 9), foreground="#666", wraplength=320).pack(fill=tk.X, pady=5)
         
+        countdown_seconds = 60
+        countdown_lbl = ttk.Label(content_frame, text=f"窗口将在 {countdown_seconds}s 后自动关闭", 
+                                  font=("微软雅黑", 9), foreground="#999")
+        countdown_lbl.pack(fill=tk.X, pady=(0, 10))
+        
+        timer_id = {"value": None}
+        def tick():
+            if not dialog.winfo_exists():
+                return
+            nonlocal countdown_seconds
+            countdown_seconds -= 1
+            if countdown_seconds <= 0:
+                try:
+                    dialog.destroy()
+                except:
+                    pass
+                return
+            try:
+                countdown_lbl.configure(text=f"窗口将在 {countdown_seconds}s 后自动关闭")
+            except:
+                pass
+            timer_id["value"] = self.root.after(1000, tick)
+        
+        timer_id["value"] = self.root.after(1000, tick)
+        
         # 按钮区域
         btn_frame = ttk.Frame(dialog, padding=10)
         btn_frame.pack(fill=tk.X, side=tk.BOTTOM)
         
         def do_view():
             self.show_browser()
-            dialog.destroy()
+            try:
+                if timer_id["value"] is not None:
+                    self.root.after_cancel(timer_id["value"])
+            except:
+                pass
+            try:
+                dialog.destroy()
+            except:
+                pass
             # 尝试激活主窗口
             self.root.deiconify()
             
         def do_close():
-            dialog.destroy()
+            try:
+                if timer_id["value"] is not None:
+                    self.root.after_cancel(timer_id["value"])
+            except:
+                pass
+            try:
+                dialog.destroy()
+            except:
+                pass
+        
+        def on_dialog_close():
+            try:
+                if timer_id["value"] is not None:
+                    self.root.after_cancel(timer_id["value"])
+            except:
+                pass
+            try:
+                dialog.destroy()
+            except:
+                pass
+        
+        dialog.protocol("WM_DELETE_WINDOW", on_dialog_close)
             
         # 样式调整
         style = ttk.Style()

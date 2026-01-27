@@ -10,7 +10,7 @@ import random
 import subprocess
 import sys
 import socket
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 
 # 强制 stdout 使用行缓冲，确保 GUI 能实时获取日志
 if sys.stdout is not None:
@@ -82,6 +82,208 @@ def load_config():
     except Exception as e:
         print(f"读取配置文件失败: {e}")
         return {"sites": [], "webhook_urls": [], "alert_webhook_urls": []}
+
+def _atomic_write_json(file_path, data):
+    tmp_path = f"{file_path}.tmp"
+    with open(tmp_path, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+    os.replace(tmp_path, file_path)
+
+def _sanitize_selector_value(v):
+    if isinstance(v, str):
+        s = v.strip()
+        if s.startswith("`") and s.endswith("`"):
+            s = s[1:-1].strip()
+        while s.endswith(")"):
+            s = s[:-1].rstrip()
+        return s
+    return v
+
+def _update_site_selectors_in_config(site_name, selectors_update):
+    if not site_name or not isinstance(selectors_update, dict):
+        return False
+
+    sanitized = {k: _sanitize_selector_value(v) for k, v in selectors_update.items() if v}
+    selectors_update = {k: v for k, v in sanitized.items() if v}
+    if not selectors_update:
+        return False
+    
+    print(f"[{site_name}] 正在尝试保存 selectors: {json.dumps(selectors_update, ensure_ascii=False)}")
+
+    config_path = get_config_path()
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            raw = json.load(f)
+    except Exception:
+        raw = {"sites": []}
+
+    is_list_format = isinstance(raw, list)
+    config = {"sites": raw} if is_list_format else (raw if isinstance(raw, dict) else {"sites": []})
+    sites = config.get("sites", [])
+    if not isinstance(sites, list):
+        sites = []
+        config["sites"] = sites
+
+    updated = False
+    target_name = (site_name or "").strip()
+    for s in sites:
+        if not isinstance(s, dict):
+            continue
+        if (s.get("name") or "").strip() != target_name:
+            continue
+        existing = s.get("selectors", {})
+        if not isinstance(existing, dict):
+            existing = {}
+        existing.update(selectors_update)
+        s["selectors"] = existing
+        updated = True
+        break
+
+    if not updated:
+        print(f"[{site_name}] 未在配置中找到同名站点，未写回: {config_path}")
+        return False
+
+    try:
+        to_write = sites if is_list_format else config
+        _atomic_write_json(config_path, to_write)
+        print(f"[{site_name}] 选择器已写回配置: {config_path}")
+        return True
+    except Exception as e:
+        print(f"[{site_name}] 站点选择器写回配置失败: {e}")
+        return False
+
+def _css_selector_for_element(page, element_handle, prefer_clickable=False):
+    if element_handle is None:
+        return None
+
+    js = r"""
+    (el, preferClickable) => {
+      const cssEscape = (v) => {
+        if (window.CSS && CSS.escape) return CSS.escape(v);
+        return String(v).replace(/[^a-zA-Z0-9_-]/g, (c) => "\\" + c);
+      };
+
+      const cssPath = (node) => {
+        if (!node || node.nodeType !== 1) return null;
+        if (node.id) return "#" + cssEscape(node.id);
+        const parts = [];
+        let cur = node;
+        let depth = 0;
+        while (cur && cur.nodeType === 1 && depth < 8) {
+          let part = cur.nodeName.toLowerCase();
+
+          const attrCandidates = [
+            ["name", cur.getAttribute && cur.getAttribute("name")],
+            ["aria-label", cur.getAttribute && cur.getAttribute("aria-label")],
+            ["placeholder", cur.getAttribute && cur.getAttribute("placeholder")],
+            ["role", cur.getAttribute && cur.getAttribute("role")],
+            ["type", cur.getAttribute && cur.getAttribute("type")]
+          ];
+          for (const [k, v] of attrCandidates) {
+            if (v && typeof v === "string" && v.length <= 64) {
+              part += `[${k}="${cssEscape(v)}"]`;
+              break;
+            }
+          }
+
+          let nth = 1;
+          let sib = cur;
+          while ((sib = sib.previousElementSibling)) {
+            if (sib.nodeName === cur.nodeName) nth++;
+          }
+          part += `:nth-of-type(${nth})`;
+          parts.unshift(part);
+
+          if (cur.parentElement && cur.parentElement.id) {
+            parts.unshift("#" + cssEscape(cur.parentElement.id));
+            break;
+          }
+          cur = cur.parentElement;
+          depth++;
+        }
+        return parts.join(" > ");
+      };
+
+      const clickableSel = 'button,a,[role="button"],[role="tab"],input[type="submit"],div[role="button"]';
+      const base = preferClickable ? (el.closest(clickableSel) || el) : el;
+      return cssPath(base);
+    }
+    """
+    try:
+        return page.evaluate(js, element_handle, bool(prefer_clickable))
+    except Exception:
+        return None
+
+def _auto_discover_order_selectors(page):
+    text_candidates = ["待审核", "待处理", "待审批", "待确认"]
+    for txt in text_candidates:
+        try:
+            loc = page.get_by_text(txt, exact=False).first
+            if not loc.is_visible(timeout=800):
+                continue
+            eh = loc.element_handle()
+            if eh is None:
+                continue
+            tab_css = _css_selector_for_element(page, eh, prefer_clickable=True)
+            if not tab_css:
+                continue
+
+            count_css = None
+            try:
+                count_css = page.evaluate(r"""
+                (el) => {
+                  const cssEscape = (v) => {
+                    if (window.CSS && CSS.escape) return CSS.escape(v);
+                    return String(v).replace(/[^a-zA-Z0-9_-]/g, (c) => "\\" + c);
+                  };
+                  const cssPath = (node) => {
+                    if (!node || node.nodeType !== 1) return null;
+                    if (node.id) return "#" + cssEscape(node.id);
+                    const parts = [];
+                    let cur = node;
+                    let depth = 0;
+                    while (cur && cur.nodeType === 1 && depth < 8) {
+                      let part = cur.nodeName.toLowerCase();
+                      let nth = 1;
+                      let sib = cur;
+                      while ((sib = sib.previousElementSibling)) {
+                        if (sib.nodeName === cur.nodeName) nth++;
+                      }
+                      part += `:nth-of-type(${nth})`;
+                      parts.unshift(part);
+                      if (cur.parentElement && cur.parentElement.id) {
+                        parts.unshift("#" + cssEscape(cur.parentElement.id));
+                        break;
+                      }
+                      cur = cur.parentElement;
+                      depth++;
+                    }
+                    return parts.join(" > ");
+                  };
+
+                  const clickableSel = 'button,a,[role="button"],[role="tab"],input[type="submit"],div[role="button"]';
+                  const base = el.closest(clickableSel) || el;
+                  const nodes = base.querySelectorAll("*");
+                  for (const n of nodes) {
+                    const t = (n.textContent || "").trim();
+                    if (!t) continue;
+                    if (t.length > 12) continue;
+                    if (/\d+/.test(t)) {
+                      return cssPath(n);
+                    }
+                  }
+                  return null;
+                }
+                """, eh)
+            except Exception:
+                count_css = None
+
+            if not count_css:
+                count_css = tab_css
+            return {"pending_tab_selector": tab_css, "pending_count_element": count_css}
+        except Exception:
+            continue
+    return {}
 
 def get_webhook_urls(alert=False):
     """获取 Webhook URLs"""
@@ -223,6 +425,36 @@ def send_wecom_notification(content, msg_type="text", webhook_url=None):
 def is_url(text):
     """判断字符串是否为URL"""
     return text and (text.startswith('http://') or text.startswith('https://'))
+
+def _is_login_like_url(url):
+    u = (url or "").lower()
+    return ("login" in u) or ("signin" in u) or ("sign-in" in u)
+
+def _is_order_like_url(url):
+    u = (url or "").lower()
+    if not u:
+        return False
+    keywords = [
+        "order", "orders",
+        "trade", "list", "order.list", "r=order.list",
+        "/order", "/orders"
+    ]
+    for k in keywords:
+        if k in u:
+            return True
+    return False
+
+def _should_accept_order_url(login_url, candidate_url):
+    if not is_url(candidate_url):
+        return False
+    if _is_login_like_url(candidate_url):
+        return False
+    if login_url and is_url(login_url):
+        host_login = _extract_hostname(login_url)
+        host_candidate = _extract_hostname(candidate_url)
+        if host_login and host_candidate and host_login != host_candidate:
+            return False
+    return True
 
 def _extract_hostname(url: str):
     try:
@@ -451,6 +683,7 @@ def check_orders(context_or_manager=None):
                     page = context.new_page()
                     
                 selectors = site['selectors']
+                auto_selectors = {}
                 if 'keep_page_alive' in site:
                     keep_page_alive = bool(site.get('keep_page_alive'))
                 else:
@@ -668,7 +901,8 @@ def check_orders(context_or_manager=None):
                                 found_state = True
                                 break
                             
-                            if page.is_visible(selectors['username_input']):
+                            user_sel = selectors.get('username_input')
+                            if user_sel and page.is_visible(user_sel):
                                 print(f"[{site['name']}] 成功抵达登录页，准备重新登录")
                                 found_state = True
                                 break
@@ -727,7 +961,14 @@ def check_orders(context_or_manager=None):
                                             # 如果是通用的 type=text，进一步检查是否像密码框（排除）
                                             # 或者是否已经在 form 中
                                             # 这里简单粗暴：只要可见且不是 hidden/disabled
-                                            selectors['username_input'] = loc # 临时更新选择器以便后续使用
+                                            try:
+                                                eh = page.locator(loc).first.element_handle()
+                                                css = _css_selector_for_element(page, eh, prefer_clickable=False) if eh else None
+                                            except Exception:
+                                                css = None
+                                            selectors['username_input'] = css or loc
+                                            # 无论是否有 css，都保存 selector (loc 是有效的 Playwright selector)
+                                            auto_selectors['username_input'] = css or loc
                                             found_user_input = True
                                             print(f"[{site['name']}] 智能匹配到账号框: {loc}")
                                             break
@@ -761,7 +1002,13 @@ def check_orders(context_or_manager=None):
                                     try:
                                         pwd_loc = "input[type='password']"
                                         if page.locator(pwd_loc).first.is_visible():
-                                            selectors['password_input'] = pwd_loc
+                                            try:
+                                                eh = page.locator(pwd_loc).first.element_handle()
+                                                css = _css_selector_for_element(page, eh, prefer_clickable=False) if eh else None
+                                            except Exception:
+                                                css = None
+                                            selectors['password_input'] = css or pwd_loc
+                                            auto_selectors['password_input'] = css or pwd_loc
                                             found_pwd_input = True
                                             print(f"[{site['name']}] 智能匹配到密码框: {pwd_loc}")
                                     except:
@@ -796,8 +1043,15 @@ def check_orders(context_or_manager=None):
                                         for btn_loc in login_btn_locators:
                                             try:
                                                 if page.locator(btn_loc).first.is_visible():
+                                                    try:
+                                                        eh = page.locator(btn_loc).first.element_handle()
+                                                        css = _css_selector_for_element(page, eh, prefer_clickable=True) if eh else None
+                                                    except Exception:
+                                                        css = None
                                                     page.click(btn_loc)
                                                     print(f"[{site['name']}] 智能点击登录按钮: {btn_loc}")
+                                                    selectors['login_button'] = css or btn_loc
+                                                    auto_selectors['login_button'] = css or btn_loc
                                                     clicked_login = True
                                                     break
                                             except:
@@ -824,11 +1078,23 @@ def check_orders(context_or_manager=None):
                     check_passed = False
                     if check_selector and not is_url(check_selector) and page.is_visible(check_selector):
                         check_passed = True
-                    elif not page.is_visible(selectors['login_button']):
-                        if not page.is_visible(selectors['username_input']):
+                    else:
+                        login_btn_sel = selectors.get('login_button')
+                        user_sel = selectors.get('username_input')
+                        login_btn_visible = True
+                        user_visible = True
+                        try:
+                            if login_btn_sel:
+                                login_btn_visible = page.is_visible(login_btn_sel)
+                        except:
+                            pass
+                        try:
+                            if user_sel:
+                                user_visible = page.is_visible(user_sel)
+                        except:
+                            pass
+                        if (login_btn_sel and not login_btn_visible) and (user_sel and not user_visible):
                             check_passed = True
-                        else:
-                                check_passed = False
 
                     if check_passed:
                         is_logged_in = True
@@ -844,25 +1110,14 @@ def check_orders(context_or_manager=None):
                             except:
                                 pass
                                 
-                        print(f"[{site['name']}] >>> 等待人工手动登录 (限时 120 秒)...")
+                        print(f"[{site['name']}] >>> 等待人工手动登录 (限时 60 秒)...")
                         
-                        # shared.current_site_name = site['name']
-                        # shared.is_interactive_mode = True
-                        
-                        # from urllib.parse import quote
-                        # safe_site_name = quote(site['name'])
-                        # control_url = f"http://{SERVER_IP}:{SERVER_PORT}/control/{safe_site_name}"
-                        # warn_msg = (
-                        #     f"⚠️ **{site['name']}** 需要人工介入！\n\n"
-                        #     f"自动登录失败，可能需要验证码。\n"
-                        #     f"请在 **120秒** 内通过下方链接远程处理：\n\n"
-                        #     f"[点击进入远程控制台]({control_url})\n\n"
-                        #     f"(处理完成后脚本将自动继续)"
-                        # )
-                        # send_wecom_notification(warn_msg, msg_type="markdown", webhook_url=get_webhook_urls(alert=True))
-                        
+                        # 准备用于检测的 selectors（合并配置的和智能发现的）
+                        effective_selectors = selectors.copy()
+                        effective_selectors.update(auto_selectors)
+
                         start_wait = time.time()
-                        while time.time() - start_wait < 120:
+                        while time.time() - start_wait < 60:
                             # 处理窗口控制队列 (在交互等待期间也要响应显示/隐藏指令)
                             try:
                                 while not shared.window_control_queue.empty():
@@ -876,21 +1131,64 @@ def check_orders(context_or_manager=None):
                                 pass
 
                             check_passed_interactive = False
+                            # 1. 检测是否出现了特定的登录后元素（如 Tab）
                             if check_selector and not is_url(check_selector) and page.is_visible(check_selector):
                                 check_passed_interactive = True
-                            elif not page.is_visible(selectors['login_button']):
-                                time.sleep(0.5)
-                                if not page.is_visible(selectors['login_button']) and not page.is_visible(selectors['username_input']):
-                                    check_passed_interactive = True
                             
+                            # 2. 检测登录框是否消失
+                            if not check_passed_interactive:
+                                login_btn_sel = effective_selectors.get('login_button')
+                                user_sel = effective_selectors.get('username_input')
+                                login_btn_visible = True
+                                user_visible = True
+                                
+                                # 如果我们甚至不知道登录框长什么样，就没法通过“消失”来判断
+                                # 但如果我们有 auto_selectors，或者配置里有，就可以判断
+                                has_login_form_info = bool(login_btn_sel or user_sel)
+                                
+                                if has_login_form_info:
+                                    try:
+                                        if login_btn_sel:
+                                            login_btn_visible = page.is_visible(login_btn_sel)
+                                    except:
+                                        pass
+                                    try:
+                                        if user_sel:
+                                            user_visible = page.is_visible(user_sel)
+                                    except:
+                                        pass
+                                    
+                                    if (not login_btn_visible) and (not user_visible):
+                                        check_passed_interactive = True
+                                        print(f"[{site['name']}] 检测到登录框/按钮消失，判定为登录成功")
+
+                            # 3. URL 兜底检测 (URL 变更且不含 login)
+                            if not check_passed_interactive:
+                                try:
+                                    current_url_int = page.url or ""
+                                    is_login_like = "login" in current_url_int.lower() or "signin" in current_url_int.lower()
+                                    # 如果当前 URL 既不是配置的登录页，也不包含 login 关键字
+                                    # 且登录框确实找不到了（或者本来就没找到）
+                                    if (current_url_int != site['login_url']) and (not is_login_like):
+                                        # 再次确认一下登录框真的不在了
+                                        login_btn_sel = effective_selectors.get('login_button')
+                                        user_sel = effective_selectors.get('username_input')
+                                        form_visible = False
+                                        if login_btn_sel and page.is_visible(login_btn_sel): form_visible = True
+                                        if user_sel and page.is_visible(user_sel): form_visible = True
+                                        
+                                        if not form_visible:
+                                            check_passed_interactive = True
+                                            print(f"[{site['name']}] URL 已变更且未发现登录框，判定为登录成功 (URL: {current_url_int})")
+                                except:
+                                    pass
+
                             if check_passed_interactive:
                                 is_logged_in = True
                                 print(f"[{site['name']}] 人工介入成功！已登录。")
                                 break
                             
                             time.sleep(0.5)
-                        
-                        # shared.is_interactive_mode = False
                         
                         # 操作结束，将浏览器移回屏幕外
                         if manager:
@@ -903,11 +1201,81 @@ def check_orders(context_or_manager=None):
                             print(f"[{site['name']}] ❌ 人工介入超时，放弃本次抓取。")
 
                     if is_logged_in:
+                        # 保存智能发现的 selector (无论是自动登录成功还是人工介入成功)
+                        if auto_selectors:
+                            print(f"[{site['name']}] 登录成功，保存智能发现的 selectors...")
+                            try:
+                                _update_site_selectors_in_config(site['name'], auto_selectors)
+                                # 更新内存中的 site 对象和 selectors，避免后续逻辑使用旧数据
+                                if 'selectors' not in site: site['selectors'] = {}
+                                site['selectors'].update(auto_selectors)
+                                selectors.update(auto_selectors)
+                            except Exception as e:
+                                print(f"[{site['name']}] 保存 selectors 失败: {e}")
+
                         # 尝试关闭可能存在的弹窗 (如工单提醒、活动通知等)
+
                         handle_popups(page, site_name=site['name'])
                         
                         save_global_cookies(context)
                         print(f"[{site['name']}] 全局 Cookie 已更新")
+
+                # 4.5 智能查找订单页面入口 (如果未配置且当前不在订单页)
+                if not selectors.get('order_menu_link'):
+                    print(f"[{site['name']}] 未配置订单页链接，尝试查找导航菜单...")
+                    menu_keywords = ["订单管理", "租赁订单", "交易管理", "我的订单", "订单列表", "全部订单"]
+                    for kw in menu_keywords:
+                        try:
+                            target = page.get_by_text(kw, exact=True).first
+                            if not target.is_visible():
+                                target = page.get_by_text(kw, exact=False).first
+                            
+                            if target.is_visible():
+                                href = None
+                                try:
+                                    eh = target.element_handle()
+                                    if eh:
+                                        href = page.evaluate("el => (el.closest('a') && el.closest('a').getAttribute('href')) || el.getAttribute('href')", eh)
+                                except:
+                                    href = None
+                                href = _sanitize_selector_value(href)
+                                if href:
+                                    if not is_url(href):
+                                        try:
+                                            href = urljoin(page.url, href)
+                                        except:
+                                            pass
+                                    if href and _is_order_like_url(href):
+                                        print(f"[{site['name']}] 发现订单链接: {href}")
+                                        selectors['order_menu_link'] = href
+                                        auto_selectors['order_menu_link'] = href
+                                        break
+
+                                print(f"[{site['name']}] 发现可能的订单入口: {kw}，尝试点击...")
+                                target.click()
+                                page.wait_for_load_state('networkidle')
+                                time.sleep(2)
+                                
+                                curr_url = _sanitize_selector_value(page.url or "")
+                                if curr_url and curr_url != site['login_url']:
+                                    order_signs = False
+                                    try:
+                                        if page.get_by_text("订单编号", exact=False).first.is_visible(timeout=800):
+                                            order_signs = True
+                                        elif page.get_by_text("订单列表", exact=False).first.is_visible(timeout=800):
+                                            order_signs = True
+                                        elif page.get_by_text("订单管理", exact=False).first.is_visible(timeout=800):
+                                            order_signs = True
+                                    except:
+                                        pass
+                                    
+                                    if order_signs or _is_order_like_url(curr_url):
+                                        print(f"[{site['name']}] 跳转成功，保存为订单页链接: {curr_url}")
+                                        selectors['order_menu_link'] = curr_url
+                                        auto_selectors['order_menu_link'] = curr_url
+                                        break
+                        except:
+                            continue
 
                 # 5. 进入订单管理
                 order_link = selectors.get('order_menu_link')
@@ -931,7 +1299,8 @@ def check_orders(context_or_manager=None):
                                 page.wait_for_load_state('domcontentloaded')
                                 time.sleep(2)
                                 # 检查是否出现了登录框（说明 cookie 失效被重定向了）
-                                if page.is_visible(selectors['username_input']):
+                                user_sel = selectors.get('username_input')
+                                if user_sel and page.is_visible(user_sel):
                                     print(f"[{site['name']}] 跳转订单页后发现回到了登录页，Cookie 已失效")
                                     
                                     # 清理当前站点的 Cookie (只清理当前域名的，避免误伤)
@@ -947,7 +1316,14 @@ def check_orders(context_or_manager=None):
                                 pass
                     else:
                         # 只有当不在订单页时才点击菜单
-                        if not page.is_visible(selectors['pending_count_element']):
+                        count_sel = selectors.get('pending_count_element')
+                        should_click_menu = True
+                        try:
+                            if count_sel:
+                                should_click_menu = not page.is_visible(count_sel)
+                        except:
+                            pass
+                        if should_click_menu:
                             print(f"[{site['name']}] 进入订单菜单...")
                             page.click(order_link)
                             page.wait_for_load_state('networkidle')
@@ -1035,6 +1411,22 @@ def check_orders(context_or_manager=None):
                                     pass
 
                             if not is_actually_visible:
+                                discovered = _auto_discover_order_selectors(page)
+                                if discovered:
+                                    for k, v in discovered.items():
+                                        if v:
+                                            selectors[k] = v
+                                            auto_selectors[k] = v
+                                    new_wait_target = selectors.get('pending_tab_selector') or selectors.get('pending_count_element')
+                                    if new_wait_target:
+                                        try:
+                                            page.wait_for_selector(new_wait_target, state='visible', timeout=15000)
+                                            print(f"[{site['name']}] 已自动发现订单关键元素并确认加载完成")
+                                            is_actually_visible = True
+                                        except:
+                                            pass
+
+                            if not is_actually_visible:
                                 print(f"[{site['name']}] ⚠️ 等待关键元素超时: {wait_err}")
                                 page_load_failed = True # 标记失败
                     else:
@@ -1047,6 +1439,29 @@ def check_orders(context_or_manager=None):
                 # 如果页面加载失败，跳过后续操作并报错
                 if page_load_failed:
                     raise Exception("页面加载失败或关键元素未出现（可能网络卡顿或需要验证码）")
+
+                if not is_url(selectors.get('order_menu_link')):
+                    candidate_url = page.url or ""
+                    if _should_accept_order_url(site.get('login_url'), candidate_url):
+                        visible_ok = False
+                        try:
+                            pending_sel = selectors.get('pending_tab_selector')
+                            count_sel = selectors.get('pending_count_element')
+                            if pending_sel and page.is_visible(pending_sel):
+                                visible_ok = True
+                            if not visible_ok and count_sel and page.is_visible(count_sel):
+                                visible_ok = True
+                        except:
+                            pass
+                        if not visible_ok:
+                            try:
+                                if page.get_by_text("待审核", exact=False).first.is_visible(timeout=500):
+                                    visible_ok = True
+                            except:
+                                pass
+                        if visible_ok:
+                            selectors['order_menu_link'] = candidate_url
+                            auto_selectors['order_menu_link'] = candidate_url
 
                 # === 特殊检测：如果配置了列表容器且不可见，直接视为 0 单 (针对兜来租等) ===
                 list_container = selectors.get('order_list_container')
@@ -1069,6 +1484,62 @@ def check_orders(context_or_manager=None):
                          # save_global_cookies(context)
                          # continue  
 
+                # 5. 尝试定位并解析“待审核” Tab
+                # 很多系统（如 ewei_shopv2）会在 Tab 上直接显示数量，例如 "待发货(3)"
+                # 即使页面内容为空，Tab 上的数字也是准确的。
+                
+                tab_count = None
+                
+                # 增强策略：不仅查找配置的 pending_tab_selector，还尝试模糊查找包含“待审核”、“待发货”等关键词的元素
+                # 并且优先信任 Tab 里的数字
+                
+                try:
+                    # 关键词列表 (移除待发货、待收货等非审核类状态)
+                    keywords = ["待审核", "待处理", "待审批", "待确认", "审核", "维权中", "待租"]
+                    
+                    for kw in keywords:
+                        # 查找包含关键词的元素 (通常是 a 标签或 li 标签)
+                        elements = page.get_by_text(kw, exact=False).all()
+                        
+                        found_number_match = None
+                        found_pure_text_match = False
+                        
+                        # 第一轮扫描：寻找带数字的匹配项 (如 "待审核(3)")
+                        for el in elements:
+                            try:
+                                if not el.is_visible(): continue
+                                text = el.inner_text().strip()
+                                
+                                # 尝试提取括号里的数字，如 "待发货(3)" -> 3
+                                match = re.search(r'[\(\uff08](\d+)[\)\uff09]', text)
+                                if not match:
+                                    match = re.search(r'(\d+)$', text) # 结尾的数字
+                                
+                                if match:
+                                    found_number_match = int(match.group(1))
+                                    print(f"[{site['name']}] 从 Tab [{text}] 提取到数量: {found_number_match}")
+                                    break
+                                elif len(text) <= len(kw) + 4:
+                                    # 记录是否发现了纯文本匹配 (长度接近关键词，且无数字)
+                                    # 例如 "待审核"
+                                    found_pure_text_match = True
+                            except:
+                                continue
+                        
+                        if found_number_match is not None:
+                            tab_count = found_number_match
+                            break
+                        
+                        # 如果没有找到带数字的，但找到了纯文本匹配，且是高优先级关键词，则视为 0
+                        # 这样可以防止回退到低优先级的 "待发货"
+                        if found_pure_text_match and kw in ["待审核", "待处理", "待审批", "待确认", "审核"]:
+                             print(f"[{site['name']}] 找到 Tab 关键词 '{kw}' 但未包含数字，默认视为 0")
+                             tab_count = 0
+                             break
+                             
+                except Exception as e:
+                    print(f"[{site['name']}] Tab 数量智能提取失败: {e}")
+
                 # 5.1 点击待审核 Tab
                 if 'pending_tab_selector' in selectors and selectors['pending_tab_selector']:
                     print(f"[{site['name']}] 点击待审核 Tab...")
@@ -1076,21 +1547,19 @@ def check_orders(context_or_manager=None):
                         # 获取 Tab 元素文本，尝试从中直接提取数量 (例如 "待审核(6)")
                         # 这可以作为一种备选方案，特别是当列表加载失败或分页元素不稳定时
                         try:
-                            tab_el = page.locator(selectors['pending_tab_selector']).first
-                            if tab_el.is_visible():
-                                tab_text = tab_el.inner_text()
-                                print(f"[{site['name']}] Tab 文本: {tab_text}")
-                                # 尝试提取括号内的数字
-                                match_tab = re.search(r'\((\d+)\)', tab_text)
-                                if match_tab:
-                                    tab_count = int(match_tab.group(1))
-                                    print(f"[{site['name']}] 从 Tab 文本提取到数量: {tab_count}")
-                                    
-                                    # 如果配置了优先使用 Tab 数量，或者后续抓取失败，可以使用这个值
-                                    # 目前策略：先存着，如果下面常规抓取失败了，就用这个
+                            # 只有当我们上面没有智能抓取到 tab_count 时，才尝试从配置的 selector 提取
+                            if tab_count is None:
+                                tab_el = page.locator(selectors['pending_tab_selector']).first
+                                if tab_el.is_visible():
+                                    tab_text = tab_el.inner_text()
+                                    print(f"[{site['name']}] Tab 文本: {tab_text}")
+                                    # 尝试提取括号内的数字
+                                    match_tab = re.search(r'[\(\uff08](\d+)[\)\uff09]', tab_text)
+                                    if match_tab:
+                                        tab_count = int(match_tab.group(1))
+                                        print(f"[{site['name']}] 从配置 Tab 文本提取到数量: {tab_count}")
                         except Exception as tab_err:
                             print(f"[{site['name']}] 提取 Tab 文本失败: {tab_err}")
-                            tab_count = None
                             
                         page.click(selectors['pending_tab_selector'])
                         page.wait_for_load_state('networkidle')
@@ -1099,18 +1568,35 @@ def check_orders(context_or_manager=None):
                         print(f"[{site['name']}] 点击 Tab 失败: {e}")
                 
                 # 6. 获取待审核数量
-                if page.is_visible(selectors['pending_count_element']):
-                    count_text = page.inner_text(selectors['pending_count_element'])
+                count_sel = selectors.get('pending_count_element')
+                if count_sel and page.is_visible(count_sel):
+                    count_text = page.inner_text(count_sel)
                     match = re.search(r'\d+', count_text)
                     count = int(match.group()) if match else 0
+                    
+                    # 确保有 URL
+                    final_link = site['selectors'].get('order_menu_link')
+                    if not is_url(final_link):
+                        try:
+                            curr = page.url
+                            if _should_accept_order_url(site.get('login_url'), curr):
+                                final_link = curr
+                                selectors['order_menu_link'] = curr
+                                auto_selectors['order_menu_link'] = curr
+                                print(f"[{site['name']}] 抓取成功，自动补充订单页 URL: {curr}")
+                        except:
+                            pass
+
                     results.append({
                         "name": site['name'], 
                         "count": count, 
                         "error": None,
-                        "link": site['selectors'].get('order_menu_link')
+                        "link": final_link
                     })
                     print(f"[{site['name']}] 抓取结果: {count}")
-                elif 'tab_count' in locals() and tab_count is not None:
+                    if auto_selectors:
+                        _update_site_selectors_in_config(site['name'], auto_selectors)
+                elif tab_count is not None:
                     # 如果常规元素不可见，但我们从 Tab 上提取到了数字，就用 Tab 的数字
                     print(f"[{site['name']}] 常规数量元素未找到，使用 Tab 上的数量: {tab_count}")
                     results.append({
@@ -1119,7 +1605,87 @@ def check_orders(context_or_manager=None):
                         "error": None,
                         "link": site['selectors'].get('order_menu_link')
                     })
+                    if auto_selectors:
+                        _update_site_selectors_in_config(site['name'], auto_selectors)
                 else:
+                    try:
+                        if not any(k in auto_selectors for k in ('pending_tab_selector', 'pending_count_element')):
+                            discovered = _auto_discover_order_selectors(page)
+                            if discovered:
+                                for k, v in discovered.items():
+                                    if v:
+                                        selectors[k] = v
+                                        auto_selectors[k] = v
+                                # 新增：如果发现了订单元素，且当前没有 URL 配置，则保存当前 URL
+                                if not is_url(selectors.get('order_menu_link')):
+                                    try:
+                                        candidate_url = page.url or ""
+                                        if _should_accept_order_url(site.get('login_url'), candidate_url):
+                                            selectors['order_menu_link'] = candidate_url
+                                            auto_selectors['order_menu_link'] = candidate_url
+                                            print(f"[{site['name']}] 自动关联订单页 URL: {candidate_url}")
+                                    except:
+                                        pass
+                    except Exception:
+                        pass
+
+                    try:
+                        if selectors.get('pending_tab_selector'):
+                            tab_el = page.locator(selectors['pending_tab_selector']).first
+                            if tab_el.is_visible(timeout=800):
+                                tab_text = tab_el.inner_text()
+                                match_tab = re.search(r'\((\d+)\)', tab_text)
+                                if match_tab:
+                                    tab_count = int(match_tab.group(1))
+                    except Exception:
+                        tab_count = None
+
+                    try:
+                        if selectors.get('pending_count_element') and page.is_visible(selectors['pending_count_element']):
+                            count_text = page.inner_text(selectors['pending_count_element'])
+                            match = re.search(r'\d+', count_text)
+                            count = int(match.group()) if match else 0
+                            
+                            # 确保有 URL
+                            final_link = site['selectors'].get('order_menu_link')
+                            if not is_url(final_link):
+                                try:
+                                    curr = page.url
+                                    if _should_accept_order_url(site.get('login_url'), curr):
+                                        final_link = curr
+                                        selectors['order_menu_link'] = curr
+                                        auto_selectors['order_menu_link'] = curr
+                                        print(f"[{site['name']}] 抓取成功，自动补充订单页 URL: {curr}")
+                                except:
+                                    pass
+
+                            results.append({
+                                "name": site['name'], 
+                                "count": count, 
+                                "error": None,
+                                "link": final_link
+                            })
+                            print(f"[{site['name']}] 抓取结果: {count}")
+                            if auto_selectors:
+                                _update_site_selectors_in_config(site['name'], auto_selectors)
+                            save_global_cookies(context)
+                            continue
+                    except Exception:
+                        pass
+
+                    if 'tab_count' in locals() and tab_count is not None:
+                        print(f"[{site['name']}] 使用 Tab 上的数量: {tab_count}")
+                        results.append({
+                            "name": site['name'], 
+                            "count": tab_count, 
+                            "error": None,
+                            "link": site['selectors'].get('order_menu_link')
+                        })
+                        if auto_selectors:
+                            _update_site_selectors_in_config(site['name'], auto_selectors)
+                        save_global_cookies(context)
+                        continue
+
                     # 如果找不到数量元素，通常意味着没有订单（即数量为0）
                     # 只有当确实无法判断时才报错，但根据用户反馈，诚赁等平台没单时就是不显示角标
                     print(f"[{site['name']}] 未找到数量元素，默认视为 0 单")
@@ -1130,6 +1696,8 @@ def check_orders(context_or_manager=None):
                         "error": None,
                         "link": site['selectors'].get('order_menu_link')
                     })
+                    if auto_selectors:
+                        _update_site_selectors_in_config(site['name'], auto_selectors)
 
                 # 更新 Cookie
                 save_global_cookies(context)
@@ -1699,6 +2267,38 @@ class BrowserManager:
                             }
                         })
                         print(f"窗口位置已调整: ({left}, {top})")
+                        
+                        # 尝试使用 win32gui 强制前置 (仅限 Windows)
+                        if sys.platform == 'win32' and left >= 0:
+                            try:
+                                import ctypes
+                                user32 = ctypes.windll.user32
+                                
+                                # 枚举所有窗口，找到标题包含 Chrome 或 Edge 的
+                                # 由于我们无法直接从 Playwright 获取 HWND，只能通过标题模糊匹配
+                                # 这不是完美的，但通常够用
+                                
+                                def enum_windows_callback(hwnd, lParam):
+                                    if user32.IsWindowVisible(hwnd):
+                                        length = user32.GetWindowTextLengthW(hwnd)
+                                        buff = ctypes.create_unicode_buffer(length + 1)
+                                        user32.GetWindowTextW(hwnd, buff, length + 1)
+                                        title = buff.value
+                                        
+                                        # 匹配常见的浏览器标题
+                                        # 注意：这里可能会误伤用户其他的浏览器窗口，但在人工介入模式下，
+                                        # 用户通常就是想看这个窗口，所以置顶所有相关窗口也是可以接受的
+                                        if "Chrome" in title or "Edge" in title or "Chromium" in title:
+                                            # 恢复并置顶
+                                            user32.ShowWindow(hwnd, 9) # SW_RESTORE
+                                            user32.SetForegroundWindow(hwnd)
+                                    return True
+                                
+                                WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_int, ctypes.c_long)
+                                user32.EnumWindows(WNDENUMPROC(enum_windows_callback), 0)
+                            except Exception as win_err:
+                                print(f"强制置顶窗口失败: {win_err}")
+                                
                     else:
                         print("无法获取 windowId，调整窗口失败")
                 except Exception as e:
