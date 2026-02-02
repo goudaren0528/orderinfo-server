@@ -12,7 +12,10 @@ app = Flask(__name__)
 app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'sqlite:///auth.db')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.secret_key = os.environ.get('SECRET_KEY', 'your-secret-key-change-it-in-prod')
-ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', 'admin123') # 默认管理员密码
+ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD')
+
+if not ADMIN_PASSWORD:
+    raise ValueError("严重错误：未设置 ADMIN_PASSWORD 环境变量。请设置该环境变量以配置管理员密码。")
 
 db = SQLAlchemy(app)
 
