@@ -75,6 +75,10 @@ def index():
         return redirect(url_for('dashboard'))
     return redirect(url_for('login'))
 
+@app.route('/admin')
+def admin_redirect():
+    return redirect(url_for('dashboard'))
+
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
@@ -265,4 +269,5 @@ with app.app_context():
     db.create_all()
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    # 避免与客户端(默认5000)冲突，使用 5005 端口
+    app.run(host='0.0.0.0', port=5005, debug=True)

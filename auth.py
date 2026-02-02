@@ -7,7 +7,7 @@ import platform
 import time
 
 # 默认服务器地址，生产环境请修改为实际地址
-DEFAULT_SERVER_URL = "http://localhost:5000"
+DEFAULT_SERVER_URL = "http://localhost:5005"
 
 class AuthManager:
     def __init__(self, server_url=None):

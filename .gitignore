@@ -16,3 +16,4 @@ dist_new/
 auth.db
 license.json
 playwright-browsers/
+*.zip
