@@ -11,12 +11,15 @@ import subprocess
 import sys
 import socket
 from urllib.parse import urlparse, urljoin
+from typing import Any, cast
 
 # 强制 stdout 使用行缓冲，确保 GUI 能实时获取日志
 if sys.stdout is not None:
     try:
-        sys.stdout.reconfigure(encoding='utf-8', line_buffering=True)
-    except Exception as e:
+        stdout = cast(Any, sys.stdout)
+        if hasattr(stdout, "reconfigure"):
+            stdout.reconfigure(encoding='utf-8', line_buffering=True)
+    except Exception:
         pass
 
 # 在导入 playwright 之前设置浏览器路径环境变量
@@ -45,18 +48,19 @@ from playwright.sync_api import sync_playwright
 from datetime import datetime
 from web_server import run_server as start_web_server
 import shared
+from auth import auth_manager
 
 # 企业微信机器人的 Webhook 地址
 # 1. 订单通知机器人 (日常战报) - 支持配置多个 Webhook URL (列表格式)
-WECOM_WEBHOOK_URL = []
+WECOM_WEBHOOK_URL: list[str] = []
 
 # 2. 人工介入通知机器人 (紧急提醒) - 支持配置多个 Webhook URL
 # 如果需要区分通知群，请修改此处的 Key；如果不需要，保持与上面一致即可
-WECOM_WEBHOOK_URL_ALERT = []
+WECOM_WEBHOOK_URL_ALERT: list[str] = []
 
 # 本机 IP 或服务器公网 IP (用于生成更新链接)
-SERVER_IP = "localhost" # 如果在云服务器，请修改为公网IP
-SERVER_PORT = 5000
+SERVER_IP = os.environ.get("WEB_SERVER_HOST_IP", "localhost") # 如果在云服务器，请修改为公网IP
+SERVER_PORT = int(os.environ.get("WEB_SERVER_PORT", 5000))
 
 def get_config_path():
     if getattr(sys, 'frozen', False):
@@ -69,19 +73,96 @@ def get_config_path():
         return os.path.join(exe_dir, 'config.json')
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')
 
+
+def _normalize_config(data):
+    if isinstance(data, list):
+        data = {"sites": data}
+    if not isinstance(data, dict):
+        data = {"sites": []}
+    if "sites" not in data or not isinstance(data.get("sites"), list):
+        data["sites"] = []
+    if "webhook_urls" not in data:
+        data["webhook_urls"] = []
+    if "feishu_webhook_urls" not in data:
+        data["feishu_webhook_urls"] = []
+    if "alert_webhook_urls" not in data:
+        data["alert_webhook_urls"] = []
+    return data
+
+
+def _merge_configs(common_config, user_config):
+    common = _normalize_config(common_config)
+    user = _normalize_config(user_config)
+    merged = dict(common)
+    for key, value in user.items():
+        if key != "sites":
+            merged[key] = value
+    merged_sites = []
+    index = {}
+    common_sites = common.get("sites", [])
+    if isinstance(common_sites, list):
+        for site in common_sites:
+            if isinstance(site, dict) and site.get("name"):
+                item = dict(site)
+                merged_sites.append(item)
+                index[item.get("name")] = item
+            else:
+                merged_sites.append(site)
+    user_sites = user.get("sites", [])
+    if isinstance(user_sites, list):
+        for site in user_sites:
+            if isinstance(site, dict) and site.get("name") in index and isinstance(index[site.get("name")], dict):
+                index[site.get("name")].update(site)
+            else:
+                merged_sites.append(site)
+    merged["sites"] = merged_sites
+    return _normalize_config(merged)
+
+
+_config_cache = None
+_config_cache_ts = 0
+_last_runtime_auth_ts = 0
+_last_runtime_auth_ok = False
+
+
 def load_config():
     """读取配置文件"""
-    try:
-        config_path = get_config_path()
-        with open(config_path, 'r', encoding='utf-8') as f:
-            config = json.load(f)
-            # 兼容旧格式（列表）和新格式（字典）
-            if isinstance(config, list):
-                return {"sites": config, "webhook_urls": [], "alert_webhook_urls": []}
-            return config
-    except Exception as e:
-        print(f"读取配置文件失败: {e}")
-        return {"sites": [], "webhook_urls": [], "alert_webhook_urls": []}
+    global _config_cache, _config_cache_ts
+    if _config_cache is not None and time.time() - _config_cache_ts < 120:
+        return _config_cache
+    if not auth_manager.load_license():
+        _config_cache = _normalize_config({})
+        _config_cache_ts = time.time()
+        return _config_cache
+    success, data = auth_manager.fetch_config()
+    if success:
+        payload = data if isinstance(data, dict) else {}
+        common_config = payload.get("common_config") or {}
+        user_config = payload.get("user_config") or {}
+        merged = _merge_configs(common_config, user_config)
+        try:
+            _atomic_write_json(get_config_path(), merged)
+        except Exception:
+            pass
+        _config_cache = merged
+        _config_cache_ts = time.time()
+        return _config_cache
+    _config_cache = _normalize_config({})
+    _config_cache_ts = time.time()
+    return _config_cache
+
+
+def _ensure_runtime_authorized():
+    global _last_runtime_auth_ts, _last_runtime_auth_ok
+    now = time.time()
+    if _last_runtime_auth_ok and now - _last_runtime_auth_ts < 120:
+        return True
+    ok, msg = auth_manager.heartbeat()
+    _last_runtime_auth_ts = now
+    _last_runtime_auth_ok = ok
+    if not ok:
+        print(f"授权验证失败: {msg}")
+    return ok
 
 def _atomic_write_json(file_path, data):
     tmp_path = f"{file_path}.tmp"
@@ -147,6 +228,8 @@ def _update_site_selectors_in_config(site_name, selectors_update):
         to_write = sites if is_list_format else config
         _atomic_write_json(config_path, to_write)
         print(f"[{site_name}] 选择器已写回配置: {config_path}")
+        if auth_manager.load_license():
+            auth_manager.save_user_config(config if not is_list_format else {"sites": sites})
         return True
     except Exception as e:
         print(f"[{site_name}] 站点选择器写回配置失败: {e}")
@@ -617,6 +700,8 @@ def check_orders(context_or_manager=None):
     else:
         context = context_or_manager
 
+    if not _ensure_runtime_authorized():
+        return
     config = load_config()
     sites = config.get('sites', [])
     config_keep_page_alive_all = bool(config.get('keep_page_alive_all'))
@@ -667,6 +752,10 @@ def check_orders(context_or_manager=None):
             if not isinstance(site, dict):
                  print(f"警告: site 配置格式错误 (类型: {type(site)})，跳过: {site}")
                  continue
+
+            if not site.get('enabled', True):
+                print(f"[{site.get('name', '未知')}] 监控已禁用，跳过。")
+                continue
 
             page = None
             try:
@@ -977,22 +1066,24 @@ def check_orders(context_or_manager=None):
                                     continue
 
                         if found_user_input:
+                            username_value = site.get('username', '')
+                            password_value = site.get('password', '')
                             # 填写账号
                             # 有些输入框可能是 React/Vue 受控组件，fill 后 value 可能没变
                             # 或者需要触发 input 事件
                             user_input_el = page.locator(selectors['username_input']).first
                             user_input_el.click()
-                            user_input_el.fill(site['username'])
+                            user_input_el.fill(username_value)
                             
                             # 校验是否填写成功
                             if not user_input_el.input_value():
                                 print(f"[{site['name']}] 检测到 fill 失败（受控组件），尝试模拟键盘输入...")
                                 user_input_el.click()
-                                page.keyboard.type(site['username'], delay=50)
+                                page.keyboard.type(username_value, delay=50)
 
                             # 3. 智能查找密码框
                             found_pwd_input = False
-                            if site.get('password'):
+                            if password_value:
                                 # 优先配置
                                 if selectors.get('password_input') and page.is_visible(selectors['password_input']):
                                     found_pwd_input = True
@@ -1017,12 +1108,12 @@ def check_orders(context_or_manager=None):
                                 if found_pwd_input:
                                     pwd_input_el = page.locator(selectors['password_input']).first
                                     pwd_input_el.click()
-                                    pwd_input_el.fill(site['password'])
+                                    pwd_input_el.fill(password_value)
                                     
                                     # 校验
                                     if not pwd_input_el.input_value():
                                         pwd_input_el.click()
-                                        page.keyboard.type(site['password'], delay=50)
+                                        page.keyboard.type(password_value, delay=50)
                                         
                                     print(f"[{site['name']}] >>> 正在点击登录...")
                                     
@@ -2337,10 +2428,11 @@ def ensure_single_instance():
         # 绑定一个特定的本地端口 (选择一个不常用的端口)
         # 注意：这里绑定的是 12345，请确保没有其他重要服务使用此端口
         # UDP 端口绑定不会影响 TCP 服务 (web_server 使用的是 TCP 5000)
-        lock_socket.bind(('127.0.0.1', 12345))
+        port = int(os.environ.get("SINGLE_INSTANCE_PORT", 12345))
+        lock_socket.bind(('127.0.0.1', port))
         return lock_socket
     except socket.error:
-        print(f"检测到程序已经在运行 (端口 12345 被占用)！")
+        print(f"检测到程序已经在运行 (端口 {port} 被占用)！")
         print("请不要重复启动监控脚本。")
         sys.exit(1)
 
@@ -2445,6 +2537,33 @@ def run_scheduler():
         browser_manager.stop()
 
 if __name__ == '__main__':
+    # === 授权校验 (双重保险) ===
+    print("正在检查授权...")
+    license_code = auth_manager.load_license()
+    if not license_code:
+        print("[错误] 未找到有效的授权信息，请从启动器启动本程序！")
+        time.sleep(3)
+        sys.exit(1)
+    
+    # 启动后台心跳线程 (每5分钟一次)
+    def _auth_heartbeat_loop():
+        while True:
+            # 首次心跳在启动后 10 秒执行，之后每 5 分钟执行一次
+            # 这样可以快速拦截非法启动，又不会拖慢启动速度
+            time.sleep(10)
+            while True:
+                try:
+                    success, msg = auth_manager.heartbeat()
+                    if not success:
+                        print(f"[严重] 授权验证失败: {msg}，程序即将退出...")
+                        os._exit(1) # 强制退出整个进程
+                except Exception as e:
+                    print(f"心跳检查异常: {e}")
+                time.sleep(300)
+
+    auth_thread = threading.Thread(target=_auth_heartbeat_loop, daemon=True)
+    auth_thread.start()
+
     # 确保单实例运行
     _instance_lock = ensure_single_instance()
     

@@ -1,9 +1,20 @@
 import json
 import os
+import secrets
 from flask import Flask, render_template_string, request, Response, jsonify
 import shared
 
 app = Flask(__name__)
+ACCESS_TOKEN = os.environ.get("WEB_SERVER_TOKEN") or secrets.token_urlsafe(24)
+
+
+def _get_request_token():
+    return request.args.get("token") or request.headers.get("X-Access-Token")
+
+
+def _is_authorized():
+    return _get_request_token() == ACCESS_TOKEN
+
 
 # 远程控制页面模板
 REMOTE_CONTROL_HTML = """
@@ -13,10 +24,10 @@ REMOTE_CONTROL_HTML = """
     <title>远程辅助登录 - {{ site_name }}</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
-        body { 
-            font-family: sans-serif; 
-            background: #222; 
-            color: white; 
+        body {
+            font-family: sans-serif;
+            background: #222;
+            color: white;
             text-align: center;
             margin: 0;
             padding: 10px;
@@ -69,9 +80,9 @@ REMOTE_CONTROL_HTML = """
         1. <b>点击</b>：直接在屏幕上点击（用于输入框聚焦、按钮点击）<br>
         2. <b>拖拽</b>：在屏幕上按住并滑动（用于<b>滑块验证码</b>）<br>
     </div>
-    
+
     <div id="screen-container">
-        <img id="screen" src="/screenshot_stream">
+        <img id="screen" src="/screenshot_stream?token={{ token }}">
     </div>
 
     <div class="controls">
@@ -85,7 +96,8 @@ REMOTE_CONTROL_HTML = """
     <script>
         const container = document.getElementById('screen-container');
         const img = document.getElementById('screen');
-        
+        const accessToken = "{{ token }}";
+
         let startX = 0, startY = 0;
         let isDragging = false;
         let startTime = 0;
@@ -94,7 +106,7 @@ REMOTE_CONTROL_HTML = """
         function getCoords(event) {
             const rect = img.getBoundingClientRect();
             let clientX, clientY;
-            
+
             if (event.touches && event.touches.length > 0) {
                 clientX = event.touches[0].clientX;
                 clientY = event.touches[0].clientY;
@@ -115,7 +127,7 @@ REMOTE_CONTROL_HTML = """
         }
 
         // === 鼠标/触摸事件处理 ===
-        
+
         function handleStart(event) {
             event.preventDefault();
             const coords = getCoords(event);
@@ -129,15 +141,15 @@ REMOTE_CONTROL_HTML = """
             if (!isDragging) return;
             event.preventDefault();
             isDragging = false;
-            
+
             const coords = getCoords(event);
             const endX = coords.x;
             const endY = coords.y;
             const duration = new Date().getTime() - startTime;
-            
+
             // 计算移动距离
             const dist = Math.sqrt(Math.pow(endX - startX, 2) + Math.pow(endY - startY, 2));
-            
+
             // 阈值判断：如果移动很小且时间很短，视为点击；否则视为拖拽
             // 距离阈值设为 0.01 (约1%的屏幕宽度)，时间设为 200ms
             if (dist < 0.01 && duration < 300) {
@@ -160,7 +172,7 @@ REMOTE_CONTROL_HTML = """
                 });
             }
         }
-        
+
         // 绑定事件
         container.addEventListener('mousedown', handleStart);
         container.addEventListener('mouseup', handleEnd);
@@ -187,7 +199,7 @@ REMOTE_CONTROL_HTML = """
         function sendAction(data) {
             return fetch('/action', {
                 method: 'POST',
-                headers: {'Content-Type': 'application/json'},
+                headers: {'Content-Type': 'application/json', 'X-Access-Token': accessToken},
                 body: JSON.stringify(data)
             });
         }
@@ -197,7 +209,7 @@ REMOTE_CONTROL_HTML = """
             const btn = document.getElementById('btnSend');
             const text = input.value;
             if (!text) return Promise.resolve();
-            
+
             const originalText = btn.innerText;
             btn.innerText = "发送中...";
             btn.disabled = true;
@@ -219,7 +231,7 @@ REMOTE_CONTROL_HTML = """
         }
 
         function sendEnter() {
-             sendAction({type: 'press', key: 'Enter'});
+            sendAction({type: 'press', key: 'Enter'});
         }
 
         // 监听输入框回车事件：自动发送文字 + 回车
@@ -238,13 +250,13 @@ REMOTE_CONTROL_HTML = """
         });
 
         function sendBackspace() {
-             sendAction({type: 'press', key: 'Backspace'});
+            sendAction({type: 'press', key: 'Backspace'});
         }
-        
+
         function sendRefresh() {
-             if(confirm("确定要刷新远程浏览器页面吗？")) {
-                 sendAction({type: 'refresh'});
-             }
+            if (confirm("确定要刷新远程浏览器页面吗？")) {
+                sendAction({type: 'refresh'});
+            }
         }
 
         // 全局监听 F5 刷新
@@ -254,11 +266,11 @@ REMOTE_CONTROL_HTML = """
                 sendRefresh();
             }
         });
-        
+
         // 简单的防抖刷新，防止图片卡死
         setInterval(() => {
             const img = document.getElementById('screen');
-            // img.src = "/screenshot_stream?" + new Date().getTime(); 
+            // img.src = "/screenshot_stream?" + new Date().getTime();
             // 还是用流式传输比较好，不需要前端轮询
         }, 5000);
     </script>
@@ -266,25 +278,32 @@ REMOTE_CONTROL_HTML = """
 </html>
 """
 
+
 def get_config():
     try:
         with open('config.json', 'r', encoding='utf-8') as f:
             return json.load(f)
-    except:
+    except Exception:
         return []
+
 
 @app.route('/control/<site_name>')
 def control_page(site_name):
+    if not _is_authorized():
+        return "Unauthorized", 401
     if not shared.is_interactive_mode:
         return "当前脚本未处于交互模式（可能正在后台运行或休眠），请等待通知唤起。", 404
-    
+
     if shared.current_site_name != site_name:
         return f"脚本当前正在处理 [{shared.current_site_name}]，请稍后或检查链接是否过期。", 403
 
-    return render_template_string(REMOTE_CONTROL_HTML, site_name=site_name)
+    return render_template_string(REMOTE_CONTROL_HTML, site_name=site_name, token=ACCESS_TOKEN)
+
 
 @app.route('/screenshot_stream')
 def screenshot_stream():
+    if not _is_authorized():
+        return "Unauthorized", 401
     """返回 MJPEG 视频流"""
     def generate():
         while shared.is_interactive_mode:
@@ -296,41 +315,56 @@ def screenshot_stream():
                 # 如果没有截图，发个空帧防止断开
                 pass
             import time
-            time.sleep(0.5) # 限制帧率，每秒2帧，节省带宽
-            
+            time.sleep(0.5)  # 限制帧率，每秒2帧，节省带宽
+
     return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
+
 
 @app.route('/action', methods=['POST'])
 def handle_action():
+    if not _is_authorized():
+        return jsonify({"error": "Unauthorized"}), 401
     if not shared.is_interactive_mode:
         return jsonify({"error": "Not interactive mode"}), 400
-        
+
     data = request.json
     shared.command_queue.put(data)
     return jsonify({"status": "ok"})
 
+
 @app.route('/api/browser/show', methods=['POST'])
 def browser_show():
+    if not _is_authorized():
+        return jsonify({"status": "error", "message": "Unauthorized"}), 401
     if shared.browser_manager:
         shared.browser_manager.move_browser_onscreen()
         return jsonify({"status": "ok", "message": "Browser moved onscreen"})
     return jsonify({"status": "error", "message": "Browser manager not initialized"}), 503
 
+
 @app.route('/api/browser/hide', methods=['POST'])
 def browser_hide():
+    if not _is_authorized():
+        return jsonify({"status": "error", "message": "Unauthorized"}), 401
     if shared.browser_manager:
         shared.browser_manager.move_browser_offscreen()
         return jsonify({"status": "ok", "message": "Browser moved offscreen"})
     return jsonify({"status": "error", "message": "Browser manager not initialized"}), 503
 
+
 @app.route('/')
 def index():
     return "多后台监控脚本 - 远程控制服务运行中"
 
+
 def run_server():
     # 生产环境部署建议用 gevent 或其他 WSGI，这里开发用默认
     # threaded=True 允许并发请求（视频流会占用连接）
-    app.run(host='0.0.0.0', port=5000, debug=False, threaded=True, use_reloader=False)
+    host = os.environ.get('WEB_SERVER_HOST', '127.0.0.1')
+    port = int(os.environ.get('WEB_SERVER_PORT', 5000))
+    print(f"远程控制访问令牌: {ACCESS_TOKEN}")
+    app.run(host=host, port=port, debug=False, threaded=True, use_reloader=False)
+
 
 if __name__ == '__main__':
     run_server()

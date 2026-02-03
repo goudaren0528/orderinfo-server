@@ -1,11 +1,28 @@
 @echo off
 chcp 65001 >nul
 echo ==========================================
-echo      ZuBangBao - Build Script
+echo      ZuBangBao - Production Build Script
 echo ==========================================
 
+echo [INFO] Switching to PRODUCTION environment...
+if exist .env.prod (
+    copy /Y .env.prod .env >nul
+    echo [OK] Loaded .env.prod
+) else (
+    echo [ERROR] .env.prod not found!
+    pause
+    exit /b 1
+)
+
+echo.
+echo [IMPORTANT] Please ensure you have updated LICENSE_SERVER_URL in .env.prod with your actual production domain!
+echo Current configuration:
+findstr "LICENSE_SERVER_URL" .env
+echo.
+timeout /t 5
+
 echo [1/4] Cleaning old files...
-set "BUILD_OUTPUT=dist_new"
+set "BUILD_OUTPUT=dist_prod"
 if exist build rmdir /s /q build
 if exist "%BUILD_OUTPUT%" rmdir /s /q "%BUILD_OUTPUT%"
 
@@ -50,6 +67,7 @@ if exist "playwright-browsers" (
 
 echo.
 echo ==========================================
-echo      Build Complete!
+echo      Production Build Complete!
 echo      Output: %DIST_DIR%\租帮宝_v3.exe
 echo ==========================================
+pause

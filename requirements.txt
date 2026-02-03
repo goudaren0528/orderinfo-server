@@ -1,6 +1,8 @@
 playwright==1.49.0
+python-dotenv
 schedule
 requests
 flask
 pystray
 Pillow
+cryptography

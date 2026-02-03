@@ -1,104 +1,75 @@
 {
-  "interval": 420,
-  "desktop_notify": true,
-  "night_mode": true,
-  "night_period": {
-    "start": 0,
-    "end": 9
-  },
-  "webhook_urls": [
-    "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=d954ddc2-fe59-47ae-b0ae-44621040f33d",
-    "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=69e5af6a-1d92-4b73-8bf9-157c22480833"
-  ],
-  "feishu_webhook_urls": [],
-  "alert_webhook_urls": [
-    "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=25b52caf-360f-4829-bc79-e83449951964"
-  ],
   "sites": [
-  {
-    "name": "诚赁",
-    "login_url": "https://merchant.chenlinzuwu.com/admin/dist/index.html",
-    "username": "米奇租赁6",
-    "password": "Tyc199795.",
-    "selectors": {
-      "username_input": "#app > div > form > div:nth-child(2) > div > div > input",
-      "password_input": "#app > div > form > div.el-form-item.el-tooltip.el-form-item--medium > div > div > input",
-      "login_button": "#app > div > form > button",
-      "order_menu_link": "https://merchant.chenlinzuwu.com/admin/dist/index.html#/orders/orderList",
-      "pending_tab_selector": "#tab-审核中", 
-      "pending_count_element": "#pane-审核中 > div.flex-c.jc-s > div:nth-child(2) > div > span.el-pagination__total" 
-    }
-  },
-  {
-    "name": "奥租",
-    "login_url": "https://seller-ui.kusen888.com/login",
-    "username": "18689208544",
-    "password": "a123456",
-    "selectors": {
-      "username_input": "#main > div > div > div > div.ivu-row > form > div.ivu-form-item.ivu-form-item-required > div > div.ivu-input-wrapper.ivu-input-wrapper-large.ivu-input-type-text > input",
-      "password_input": "#main > div > div > div > div.ivu-row > form > div:nth-child(2) > div > div > input",
-      "login_button": "#main > div > div > div > div.ivu-row > div > div",
-      "order_menu_link": "https://seller-ui.kusen888.com/orderList",
-      "pending_tab_selector": "#main > div > div.single-page-con > div > div > div > div > ul > li:nth-child(3)", 
-      "pending_count_element": "#main > div > div.single-page-con > div > div > div > div > div:nth-child(6) > ul > span" 
-    }
-  },
     {
-    "name": "优品租",
-    "login_url": "https://merchant.qnvipmall.com/login?redirect=%2Findex",
-    "username": "18689208544",
-    "password": "123456",
-    "selectors": {
-      "username_input": "#app > div.login > form > div:nth-child(2) > div > div > input",
-      "password_input": "#app > div.login > form > div:nth-child(3) > div > div > input",
-      "login_button": "#app > div.login > form > div:nth-child(6) > div > button",
-      "order_menu_link": "https://merchant.qnvipmall.com/order/audit",
-      "pending_tab_selector": "#tags-view-container > div > div.el-scrollbar__wrap > div > span.tags-view-item.router-link-exact-active.router-link-active.active", 
-      "pending_count_element": "#app > div.app-wrapper.openSidebar > div.main-container.hasTagsView > div:nth-child(2) > section > div > div.app-pager > div > span.el-pagination__total" 
-    }
-  },
+      "login_url": "https://merchant.chenlinzuwu.com/admin/dist/index.html",
+      "name": "诚赁",
+      "selectors": {
+        "login_button": "#app > div > form > button",
+        "order_menu_link": "https://merchant.chenlinzuwu.com/admin/dist/index.html#/orders/orderList",
+        "password_input": "#app > div > form > div.el-form-item.el-tooltip.el-form-item--medium > div > div > input",
+        "pending_count_element": "#pane-审核中 > div.flex-c.jc-s > div:nth-child(2) > div > span.el-pagination__total",
+        "pending_tab_selector": "#tab-审核中",
+        "username_input": "#app > div > form > div:nth-child(2) > div > div > input"
+      },
+      "enabled": false
+    },
     {
-    "name": "零零享",
-    "login_url": "https://www.llxzu.com/businessNew/#/user/login",
-    "username": "15920577954",
-    "password": "",
-    "selectors": {
-      "username_input": "#mobile",
-      "password_input": "#smsLoginVerifyCode",
-      "login_button": "#root > div > div > div.ant-spin-nested-loading.css-1x0dypw > div > div > div > div.ant-pro-form-login-main.css-1x0dypw > form > button",
-      "order_menu_link": "https://www.llxzu.com/businessNew/#/Order/OrderManage/OrderList",
-      "pending_tab_selector": "#root > div > div.ant-layout.ant-layout-has-sider.css-dag3b9 > div.ant-pro-layout-container.css-dag3b9 > main > div.ant-pro-page-container.css-dag3b9 > div.ant-pro-grid-content.css-dag3b9 > div > div > div.css-dag3b9.ant-pro-page-container-children-container > div.orderListStyle > div:nth-child(2) > div > div.order_tabs > div.ant-tabs.ant-tabs-top.css-dag3b9 > div.ant-tabs-nav > div.ant-tabs-nav-wrap.ant-tabs-nav-wrap-ping-right > div > div:nth-child(3)", 
-      "pending_count_element": "#root > div > div.ant-layout.ant-layout-has-sider.css-dag3b9 > div.ant-pro-layout-container.css-dag3b9 > main > div.ant-pro-page-container.css-dag3b9 > div.ant-pro-grid-content.css-dag3b9 > div > div > div.css-dag3b9.ant-pro-page-container-children-container > div.orderListStyle > div:nth-child(3) > div > ul > li.ant-pagination-total-text" 
-    }
-  },
+      "login_url": "https://seller-ui.kusen888.com/login",
+      "name": "奥租",
+      "selectors": {
+        "login_button": "#main > div > div > div > div.ivu-row > div > div",
+        "order_menu_link": "https://seller-ui.kusen888.com/orderList",
+        "password_input": "#main > div > div > div > div.ivu-row > form > div:nth-child(2) > div > div > input",
+        "pending_count_element": "#main > div > div.single-page-con > div > div > div > div > div:nth-child(6) > ul > span",
+        "pending_tab_selector": "#main > div > div.single-page-con > div > div > div > div > ul > li:nth-child(3)",
+        "username_input": "#main > div > div > div > div.ivu-row > form > div.ivu-form-item.ivu-form-item-required > div > div.ivu-input-wrapper.ivu-input-wrapper-large.ivu-input-type-text > input"
+      },
+      "enabled": false
+    },
     {
-    "name": "兜来租",
-    "login_url": "https://dlz.doulaizu.com.cn",
-    "username": "13719581297",
-    "password": "MQ888888",
-    "selectors": {
-      "username_input": "body > div.signinpanel > div > div.col-sm-5 > form > input:nth-child(3)",
-      "password_input": "body > div.signinpanel > div > div.col-sm-5 > form > input.form-control.m-b",
-      "login_button": "#btn-login",
-      "order_menu_link": "https://dlz.doulaizu.com.cn/web/merchant.php?c=site&a=entry&m=ewei_shopv2&do=web&r=order.list.status1",
-      "pending_tab_selector": "#myTab > li:nth-child(3) > a >> visible=true", 
-      "pending_count_element": "#myTab > li:nth-child(3) > a >> visible=true",
-      "order_list_container": "body > div.wb-container.right-panel > div.page-content > form > div > div"
-    }
-  },
+      "login_url": "https://merchant.qnvipmall.com/login?redirect=%2Findex",
+      "name": "优品租",
+      "selectors": {
+        "login_button": "#app > div.login > form > div:nth-child(6) > div > button",
+        "order_menu_link": "https://merchant.qnvipmall.com/order/audit",
+        "password_input": "#app > div.login > form > div:nth-child(3) > div > div > input",
+        "pending_count_element": "#app > div.app-wrapper.openSidebar > div.main-container.hasTagsView > div:nth-child(2) > section > div > div.app-pager > div > span.el-pagination__total",
+        "pending_tab_selector": "#tags-view-container > div > div.el-scrollbar__wrap > div > span.tags-view-item.router-link-exact-active.router-link-active.active",
+        "username_input": "#app > div.login > form > div:nth-child(2) > div > div > input"
+      },
+      "enabled": false
+    },
     {
-    "name": "米奇支付宝",
-    "login_url": "https://szguokuai.zlj.xyzulin.top/web/index.php?c=site&a=entry&m=ewei_shopv2&do=web&r=order.list.status1",
-    "username": "伟填",
-    "password": "Test0528.",
-    "selectors": {
-      "username_input": "#form1 > div > div:nth-child(3) > input",
-      "password_input": "#form1 > div > div:nth-child(4) > input",
-      "login_button": "#form1 > button",
-      "order_menu_link": "https://szguokuai.zlj.xyzulin.top/web/index.php?c=site&a=entry&m=ewei_shopv2&do=web&r=order.list.status1",
-      "pending_tab_selector": "#myTab > li:nth-child(3) > a >> visible=true", 
-      "pending_count_element": "#pagination > div > ul > li > span"
+      "login_url": "https://www.llxzu.com/businessNew/#/user/login",
+      "name": "零零享",
+      "selectors": {
+        "login_button": "#root > div > div > div.ant-spin-nested-loading.css-1x0dypw > div > div > div > div.ant-pro-form-login-main.css-1x0dypw > form > button",
+        "order_menu_link": "https://www.llxzu.com/businessNew/#/Order/OrderManage/OrderList",
+        "password_input": "#smsLoginVerifyCode",
+        "pending_count_element": "#root > div > div.ant-layout.ant-layout-has-sider.css-dag3b9 > div.ant-pro-layout-container.css-dag3b9 > main > div.ant-pro-page-container.css-dag3b9 > div.ant-pro-grid-content.css-dag3b9 > div > div > div.css-dag3b9.ant-pro-page-container-children-container > div.orderListStyle > div:nth-child(3) > div > ul > li.ant-pagination-total-text",
+        "pending_tab_selector": "#root > div > div.ant-layout.ant-layout-has-sider.css-dag3b9 > div.ant-pro-layout-container.css-dag3b9 > main > div.ant-pro-page-container.css-dag3b9 > div.ant-pro-grid-content.css-dag3b9 > div > div > div.css-dag3b9.ant-pro-page-container-children-container > div.orderListStyle > div:nth-child(2) > div > div.order_tabs > div.ant-tabs.ant-tabs-top.css-dag3b9 > div.ant-tabs-nav > div.ant-tabs-nav-wrap.ant-tabs-nav-wrap-ping-right > div > div:nth-child(3)",
+        "username_input": "#mobile"
+      },
+      "enabled": false
+    },
+    {
+      "login_url": "https://dlz.doulaizu.com.cn",
+      "name": "兜来租",
+      "selectors": {
+        "login_button": "#btn-login",
+        "order_list_container": "body > div.wb-container.right-panel > div.page-content > form > div > div",
+        "order_menu_link": "https://dlz.doulaizu.com.cn/web/merchant.php?c=site&a=entry&m=ewei_shopv2&do=web&r=order.list.status1",
+        "password_input": "body > div.signinpanel > div > div.col-sm-5 > form > input.form-control.m-b",
+        "pending_count_element": "#myTab > li:nth-child(3) > a >> visible=true",
+        "pending_tab_selector": "#myTab > li:nth-child(3) > a >> visible=true",
+        "username_input": "body > div.signinpanel > div > div.col-sm-5 > form > input:nth-child(3)"
+      },
+      "enabled": false
     }
-  }  
-  ]
+  ],
+  "webhook_urls": [],
+  "feishu_webhook_urls": [],
+  "alert_webhook_urls": [],
+  "interval": 60,
+  "desktop_notify": true
 }

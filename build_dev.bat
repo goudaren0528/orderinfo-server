@@ -1,11 +1,19 @@
 @echo off
 chcp 65001 >nul
 echo ==========================================
-echo      ZuBangBao - Build Script
+echo      ZuBangBao - Build Script (DEV)
 echo ==========================================
 
+echo [0/4] Preparing Environment (DEV)...
+copy /Y .env.dev .env >nul
+if %errorlevel% neq 0 (
+    echo [ERROR] Failed to copy .env.dev to .env
+    exit /b %errorlevel%
+)
+echo Environment set to DEVELOPMENT.
+
 echo [1/4] Cleaning old files...
-set "BUILD_OUTPUT=dist_new"
+set "BUILD_OUTPUT=dist_dev"
 if exist build rmdir /s /q build
 if exist "%BUILD_OUTPUT%" rmdir /s /q "%BUILD_OUTPUT%"
 
@@ -50,6 +58,7 @@ if exist "playwright-browsers" (
 
 echo.
 echo ==========================================
-echo      Build Complete!
+echo      DEV Build Complete!
 echo      Output: %DIST_DIR%\租帮宝_v3.exe
 echo ==========================================
+pause

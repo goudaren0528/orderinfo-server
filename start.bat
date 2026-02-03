@@ -11,6 +11,9 @@ if exist venv\Scripts\activate.bat (
     call venv\Scripts\activate.bat
 )
 
+echo [INFO] Auto-switching to Development Config...
+copy /Y .env.dev .env >nul
+
 echo Starting main script...
 python main.py
 

@@ -6,6 +6,15 @@
     <title>租帮宝授权管理后台</title>
     <link href="https://cdn.bootcdn.net/ajax/libs/twitter-bootstrap/5.3.1/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdn.bootcdn.net/ajax/libs/font-awesome/6.4.2/css/all.min.css" rel="stylesheet">
+    <style>
+        .table-actions .btn {
+            padding: 0.25rem 0.5rem;
+            font-size: 0.875rem;
+        }
+        .search-box {
+            max-width: 300px;
+        }
+    </style>
 </head>
 <body>
     <nav class="navbar navbar-dark bg-dark mb-4">
@@ -27,101 +36,140 @@
           {% endif %}
         {% endwith %}
 
-        <div class="row">
-            <!-- 生成授权码卡片 -->
-            <div class="col-md-4 mb-4">
-                <div class="card h-100">
-                    <div class="card-header bg-primary text-white">
-                        <i class="fas fa-plus-circle me-2"></i>生成新授权码
-                    </div>
-                    <div class="card-body">
-                        <form action="{{ url_for('generate_license_view') }}" method="POST">
-                            <div class="mb-3">
-                                <label class="form-label">有效期 (天)</label>
-                                <input type="number" name="days" class="form-control" value="365" min="1">
-                            </div>
-                            <div class="mb-3">
-                                <label class="form-label">最大设备数</label>
-                                <input type="number" name="max_devices" class="form-control" value="1" min="1">
-                            </div>
-                            <div class="mb-3">
-                                <label class="form-label">自定义授权码 (可选)</label>
-                                <input type="text" name="code" class="form-control" placeholder="留空自动生成">
-                            </div>
-                            <button type="submit" class="btn btn-primary w-100">生成授权</button>
-                        </form>
+        <!-- 顶部统计卡片 -->
+        <div class="row mb-4">
+            <div class="col-md-6">
+                <div class="card bg-success text-white h-100">
+                    <div class="card-body d-flex align-items-center justify-content-between">
+                        <div>
+                            <h5 class="card-title">总授权数</h5>
+                            <h2 class="display-6 mb-0">{{ total_licenses }}</h2>
+                        </div>
+                        <i class="fas fa-key fa-3x opacity-50"></i>
                     </div>
                 </div>
             </div>
+            <div class="col-md-6">
+                <div class="card bg-info text-white h-100">
+                    <div class="card-body d-flex align-items-center justify-content-between">
+                        <div>
+                            <h5 class="card-title">在线设备数</h5>
+                            <h2 class="display-6 mb-0">{{ total_devices }}</h2>
+                        </div>
+                        <i class="fas fa-desktop fa-3x opacity-50"></i>
+                    </div>
+                </div>
+            </div>
+        </div>
 
-            <!-- 统计信息 -->
-            <div class="col-md-8 mb-4">
-                <div class="row">
-                    <div class="col-md-6 mb-3">
-                        <div class="card bg-success text-white h-100">
-                            <div class="card-body text-center">
-                                <h5 class="card-title">总授权数</h5>
-                                <h2 class="display-4">{{ total_licenses }}</h2>
-                            </div>
-                        </div>
+        <!-- 工具栏 -->
+        <div class="card mb-4">
+            <div class="card-body">
+                <div class="d-flex flex-wrap justify-content-between align-items-center gap-3">
+                    <div class="d-flex gap-2">
+                        <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#createLicenseModal">
+                            <i class="fas fa-plus me-1"></i> 新建授权
+                        </button>
+                        <a href="{{ url_for('export_licenses') }}" class="btn btn-outline-secondary">
+                            <i class="fas fa-download me-1"></i> 导出
+                        </a>
+                        <button class="btn btn-outline-secondary" data-bs-toggle="modal" data-bs-target="#importLicenseModal">
+                            <i class="fas fa-upload me-1"></i> 导入
+                        </button>
                     </div>
-                    <div class="col-md-6 mb-3">
-                        <div class="card bg-info text-white h-100">
-                            <div class="card-body text-center">
-                                <h5 class="card-title">在线设备数</h5>
-                                <h2 class="display-4">{{ total_devices }}</h2>
-                            </div>
+                    
+                    <form class="d-flex search-box" method="GET" action="{{ url_for('dashboard') }}">
+                        <div class="input-group">
+                            <span class="input-group-text bg-white border-end-0">
+                                <i class="fas fa-search text-muted"></i>
+                            </span>
+                            <input type="text" name="remark" class="form-control border-start-0" placeholder="搜索备注..." value="{{ remark_filter }}">
+                            {% if remark_filter %}
+                                <a href="{{ url_for('dashboard') }}" class="btn btn-outline-secondary border-start-0" title="清除筛选">
+                                    <i class="fas fa-times"></i>
+                                </a>
+                            {% endif %}
+                            <button type="submit" class="btn btn-outline-primary">搜索</button>
                         </div>
-                    </div>
+                    </form>
                 </div>
             </div>
         </div>
 
         <!-- 授权列表 -->
         <div class="card">
-            <div class="card-header">
-                <i class="fas fa-list me-2"></i>授权列表
+            <div class="card-header bg-white py-3">
+                <h5 class="mb-0"><i class="fas fa-list me-2"></i>授权列表</h5>
             </div>
-            <div class="card-body">
+            <div class="card-body p-0">
                 <div class="table-responsive">
-                    <table class="table table-striped table-hover">
-                        <thead>
+                    <table class="table table-hover align-middle mb-0">
+                        <thead class="table-light">
                             <tr>
-                                <th>授权码</th>
+                                <th class="ps-4">授权码</th>
+                                <th>备注</th>
                                 <th>设备数 (在线/最大)</th>
-                                <th>有效期至</th>
+                                <th>有效期</th>
                                 <th>状态</th>
                                 <th>创建时间</th>
-                                <th>操作</th>
+                                <th class="text-end pe-4">操作</th>
                             </tr>
                         </thead>
                         <tbody>
                             {% for license in licenses %}
                             <tr>
+                                <td class="ps-4">
+                                    <div class="d-flex align-items-center">
+                                        <code class="me-2 user-select-all">{{ license.code }}</code>
+                                        <button class="btn btn-sm btn-light text-muted copy-btn p-0 border-0" data-clipboard-text="{{ license.code }}" title="复制">
+                                            <i class="far fa-copy"></i>
+                                        </button>
+                                    </div>
+                                </td>
+                                <td>{{ license.remark or '-' }}</td>
                                 <td>
-                                    <code>{{ license.code }}</code>
-                                    <button class="btn btn-sm btn-link text-decoration-none copy-btn" data-clipboard-text="{{ license.code }}" title="复制">
-                                        <i class="far fa-copy"></i>
-                                    </button>
+                                    <a href="javascript:void(0)" onclick="showDeviceDetails('{{ license.code }}')" class="text-decoration-none">
+                                        <span class="badge bg-{{ 'success' if license.active_devices_count < license.max_devices else 'warning' }} rounded-pill">
+                                            {{ license.active_devices_count }} / {{ license.max_devices }}
+                                        </span>
+                                    </a>
                                 </td>
                                 <td>
-                                    <span class="badge bg-{{ 'success' if license.active_devices_count < license.max_devices else 'warning' }}">
-                                        {{ license.active_devices_count }} / {{ license.max_devices }}
-                                    </span>
-                                </td>
-                                <td>{{ license.expire_date.strftime('%Y-%m-%d') }}</td>
-                                <td>
-                                    {% if license.expire_date < now %}
-                                        <span class="badge bg-danger">已过期</span>
+                                    {% if license.expire_date >= permanent_cutoff %}
+                                        <span class="badge bg-primary rounded-pill">永久有效</span>
                                     {% else %}
-                                        <span class="badge bg-success">正常</span>
+                                        {{ license.expire_date.strftime('%Y-%m-%d') }}
+                                    {% endif %}
+                                </td>
+                                <td>
+                                    {% if license.revoked %}
+                                        <span class="badge bg-dark rounded-pill">已作废</span>
+                                    {% elif license.expire_date < now %}
+                                        <span class="badge bg-danger rounded-pill">已过期</span>
+                                    {% else %}
+                                        <span class="badge bg-success rounded-pill">正常</span>
                                     {% endif %}
                                 </td>
                                 <td class="text-muted small">{{ license.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
-                                <td>
+                                <td class="text-end pe-4 table-actions">
+                                    <button class="btn btn-outline-primary btn-sm me-1" 
+                                            onclick="openEditModal('{{ license.code }}', '{{ license.remark or '' }}', '{{ license.max_devices }}', '{{ license.expire_date.strftime('%Y-%m-%d') }}', {{ 'true' if license.expire_date >= permanent_cutoff else 'false' }}, {{ 'true' if license.revoked else 'false' }})"
+                                            title="编辑">
+                                        <i class="fas fa-edit"></i>
+                                    </button>
                                     <form action="{{ url_for('delete_license', code=license.code) }}" method="POST" onsubmit="return confirm('确定要删除此授权码吗？删除后用户将无法使用！');" style="display:inline;">
-                                        <button type="submit" class="btn btn-danger btn-sm"><i class="fas fa-trash"></i></button>
+                                        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                                        <button type="submit" class="btn btn-outline-danger btn-sm" title="删除">
+                                            <i class="fas fa-trash"></i>
+                                        </button>
                                     </form>
+                                </td>
+                            </tr>
+                            {% else %}
+                            <tr>
+                                <td colspan="7" class="text-center py-5 text-muted">
+                                    <i class="fas fa-inbox fa-3x mb-3 opacity-50"></i>
+                                    <p>暂无授权数据</p>
                                 </td>
                             </tr>
                             {% endfor %}
@@ -132,18 +180,262 @@
         </div>
     </div>
 
+    <!-- 新建授权 Modal -->
+    <div class="modal fade" id="createLicenseModal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">新建授权</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <form action="{{ url_for('generate_license_view') }}" method="POST">
+                    <div class="modal-body">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                        <div class="mb-3">
+                            <label class="form-label">备注</label>
+                            <input type="text" name="remark" class="form-control" placeholder="选填，例如：客户名称">
+                        </div>
+                        <div class="row g-3 mb-3">
+                            <div class="col-md-6">
+                                <label class="form-label">开始日期</label>
+                                <input type="date" name="start_date" class="form-control">
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label">有效期 (天)</label>
+                                <input type="number" name="days" class="form-control" value="365" min="1">
+                            </div>
+                        </div>
+                        <div class="mb-3 form-check">
+                            <input type="checkbox" name="permanent" class="form-check-input" id="createPermanent">
+                            <label class="form-check-label" for="createPermanent">永久有效</label>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">最大设备数</label>
+                            <input type="number" name="max_devices" class="form-control" value="1" min="1">
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">自定义授权码 (可选)</label>
+                            <input type="text" name="code" class="form-control" placeholder="留空自动生成">
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                        <button type="submit" class="btn btn-primary">生成</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- 编辑授权 Modal -->
+    <div class="modal fade" id="editLicenseModal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">编辑授权</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <form id="editForm" method="POST">
+                    <div class="modal-body">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                        <div class="mb-3">
+                            <label class="form-label">授权码</label>
+                            <input type="text" id="editCodeDisplay" class="form-control-plaintext fw-bold" readonly>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">备注</label>
+                            <input type="text" name="remark" id="editRemark" class="form-control">
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">最大设备数</label>
+                            <input type="number" name="max_devices" id="editMaxDevices" class="form-control" min="1">
+                        </div>
+                        
+                        <hr>
+                        <h6 class="mb-3 text-muted">有效期调整 (留空则不修改)</h6>
+                        
+                        <div class="mb-3">
+                            <label class="form-label">截止日期</label>
+                            <input type="date" name="expire_date" id="editExpireDate" class="form-control">
+                        </div>
+                        <div class="row g-3 mb-3">
+                            <div class="col-md-6">
+                                <label class="form-label">开始日期</label>
+                                <input type="date" name="start_date" class="form-control">
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label">增加/设置天数</label>
+                                <input type="number" name="days" class="form-control" min="1" placeholder="天数">
+                            </div>
+                        </div>
+                        <div class="mb-3 form-check">
+                            <input type="checkbox" name="permanent" class="form-check-input" id="editPermanent">
+                            <label class="form-check-label" for="editPermanent">设置为永久有效</label>
+                        </div>
+                        <div class="mb-3 form-check">
+                            <input type="checkbox" name="revoked" class="form-check-input" id="editRevoked">
+                            <label class="form-check-label" for="editRevoked">作废该授权码</label>
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                        <button type="submit" class="btn btn-primary">保存修改</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- 导入 Modal -->
+    <div class="modal fade" id="importLicenseModal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">导入授权码</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <form action="{{ url_for('import_licenses') }}" method="POST" enctype="multipart/form-data">
+                    <div class="modal-body">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                        <div class="mb-3">
+                            <label class="form-label">选择 JSON 文件</label>
+                            <input type="file" name="license_file" class="form-control" accept=".json" required>
+                        </div>
+                        <div class="alert alert-light border small">
+                            <strong>提示：</strong>
+                            <ul class="mb-0 ps-3">
+                                <li>文件格式必须为 JSON 数组</li>
+                                <li>重复的授权码将自动去重</li>
+                                <li>支持字段：code, max_devices, expire_date/days, remark</li>
+                            </ul>
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                        <button type="submit" class="btn btn-primary">开始导入</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Device Details Modal -->
+    <div class="modal fade" id="deviceDetailsModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">设备详情</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="table-responsive">
+                        <table class="table table-striped table-hover" id="deviceTable">
+                            <thead>
+                                <tr>
+                                    <th>机器码</th>
+                                    <th>IP地址</th>
+                                    <th>最近心跳</th>
+                                    <th>激活时间</th>
+                                    <th>状态</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <!-- Populated by JS -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <script src="https://cdn.bootcdn.net/ajax/libs/clipboard.js/2.0.11/clipboard.min.js"></script>
     <script src="https://cdn.bootcdn.net/ajax/libs/twitter-bootstrap/5.3.1/js/bootstrap.bundle.min.js"></script>
     <script>
+        // 复制功能
         var clipboard = new ClipboardJS('.copy-btn', {
             text: function(trigger) {
                 return trigger.getAttribute('data-clipboard-text');
             }
         });
         clipboard.on('success', function(e) {
-            alert('复制成功: ' + e.text);
+            // 可以加个 toast 提示，这里简单用 title 变化
+            const originalTitle = e.trigger.getAttribute('title');
+            e.trigger.setAttribute('title', '已复制!');
+            const tooltip = bootstrap.Tooltip.getOrCreateInstance(e.trigger);
+            tooltip.show();
+            setTimeout(() => {
+                e.trigger.setAttribute('title', originalTitle);
+                tooltip.dispose();
+            }, 2000);
             e.clearSelection();
         });
+
+        // 初始化 Tooltips
+        var tooltipTriggerList = [].slice.call(document.querySelectorAll('[title]'))
+        var tooltipList = tooltipTriggerList.map(function (tooltipTriggerEl) {
+            return new bootstrap.Tooltip(tooltipTriggerEl)
+        })
+
+        // 打开编辑 Modal
+        function openEditModal(code, remark, maxDevices, expireDate, isPermanent, isRevoked) {
+            const modal = new bootstrap.Modal(document.getElementById('editLicenseModal'));
+            document.getElementById('editCodeDisplay').value = code;
+            document.getElementById('editRemark').value = remark;
+            document.getElementById('editMaxDevices').value = maxDevices;
+            
+            // 重置有效期字段
+            document.getElementById('editPermanent').checked = isPermanent;
+            document.getElementById('editRevoked').checked = isRevoked;
+            document.getElementById('editExpireDate').value = expireDate || '';
+            const form = document.getElementById('editForm');
+            form.action = "{{ url_for('update_license', code='PLACEHOLDER') }}".replace('PLACEHOLDER', code);
+            
+            modal.show();
+        }
+
+        // 显示设备详情
+        function showDeviceDetails(code) {
+            const modalEl = document.getElementById('deviceDetailsModal');
+            const modal = new bootstrap.Modal(modalEl);
+            const tbody = document.querySelector('#deviceTable tbody');
+            tbody.innerHTML = '<tr><td colspan="5" class="text-center">加载中...</td></tr>';
+            
+            modal.show();
+
+            fetch(`/dashboard/devices/${code}`)
+                .then(response => response.json())
+                .then(data => {
+                    tbody.innerHTML = '';
+                    if (data.error) {
+                        tbody.innerHTML = `<tr><td colspan="5" class="text-center text-danger">${data.error}</td></tr>`;
+                        return;
+                    }
+                    if (data.length === 0) {
+                        tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted">暂无设备</td></tr>';
+                        return;
+                    }
+                    data.forEach(device => {
+                        const statusBadge = device.is_online 
+                            ? '<span class="badge bg-success">在线</span>' 
+                            : '<span class="badge bg-secondary">离线</span>';
+                        
+                        const row = `
+                            <tr>
+                                <td><code class="small text-muted">${device.machine_id}</code></td>
+                                <td>${device.ip_address}</td>
+                                <td>${device.last_heartbeat}</td>
+                                <td>${device.created_at || '-'}</td>
+                                <td>${statusBadge}</td>
+                            </tr>
+                        `;
+                        tbody.insertAdjacentHTML('beforeend', row);
+                    });
+                })
+                .catch(err => {
+                    tbody.innerHTML = `<tr><td colspan="5" class="text-center text-danger">加载失败: ${err}</td></tr>`;
+                });
+        }
     </script>
 </body>
 </html>

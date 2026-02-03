@@ -6,12 +6,16 @@ import threading
 import os
 import sys
 import time
+from datetime import datetime
 import requests
-import pystray
+import importlib
+from typing import Any
 from PIL import Image, ImageDraw
 import webbrowser
 import re
 from auth import auth_manager
+
+pystray: Any = importlib.import_module("pystray")
 
 CONFIG_FILE = 'config.json'
 if getattr(sys, 'frozen', False):
@@ -22,30 +26,78 @@ else:
     CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')
 
 APP_TITLE = "租帮宝 - 多后台订单监控助手"
+APP_VERSION = "v1.0.0"
+
+
+def _normalize_config(data):
+    if isinstance(data, list):
+        data = {"sites": data}
+    if not isinstance(data, dict):
+        data = {"sites": []}
+    if "sites" not in data or not isinstance(data.get("sites"), list):
+        data["sites"] = []
+    if "webhook_urls" not in data:
+        data["webhook_urls"] = []
+    if "feishu_webhook_urls" not in data:
+        data["feishu_webhook_urls"] = []
+    if "alert_webhook_urls" not in data:
+        data["alert_webhook_urls"] = []
+    if "interval" not in data:
+        data["interval"] = 60
+    if "desktop_notify" not in data:
+        data["desktop_notify"] = True
+    return data
+
+
+def _merge_configs(common_config, user_config):
+    common = _normalize_config(common_config)
+    user = _normalize_config(user_config)
+    merged = dict(common)
+    for key, value in user.items():
+        if key != "sites":
+            merged[key] = value
+    merged_sites = []
+    index = {}
+    common_sites = common.get("sites", [])
+    if isinstance(common_sites, list):
+        for site in common_sites:
+            if isinstance(site, dict) and site.get("name"):
+                item = dict(site)
+                merged_sites.append(item)
+                index[item.get("name")] = item
+            else:
+                merged_sites.append(site)
+    user_sites = user.get("sites", [])
+    if isinstance(user_sites, list):
+        for site in user_sites:
+            if isinstance(site, dict) and site.get("name") in index and isinstance(index[site.get("name")], dict):
+                index[site.get("name")].update(site)
+            else:
+                merged_sites.append(site)
+    merged["sites"] = merged_sites
+    return _normalize_config(merged)
+
 
 class ConfigManager:
     @staticmethod
     def load():
         if not os.path.exists(CONFIG_FILE):
-            return {"sites": [], "webhook_urls": [], "feishu_webhook_urls": [], "alert_webhook_urls": [], "interval": 60, "desktop_notify": True}
+            return _normalize_config({})
         try:
             with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-                if isinstance(data, list):
-                    return {"sites": data, "webhook_urls": [], "feishu_webhook_urls": [], "alert_webhook_urls": [], "interval": 60, "desktop_notify": True}
-                # 补全默认字段
-                if "webhook_urls" not in data: data["webhook_urls"] = []
-                if "feishu_webhook_urls" not in data: data["feishu_webhook_urls"] = []
-                if "alert_webhook_urls" not in data: data["alert_webhook_urls"] = []
-                if "interval" not in data: data["interval"] = 60
-                if "desktop_notify" not in data: data["desktop_notify"] = True
-                return data
+                return _normalize_config(data)
         except Exception as e:
             messagebox.showerror("错误", f"配置文件读取失败: {e}")
-            return {"sites": [], "webhook_urls": [], "feishu_webhook_urls": [], "alert_webhook_urls": [], "interval": 60, "desktop_notify": True}
+            return _normalize_config({})
 
     @staticmethod
-    def save(data):
+    def save(data, remote_sync=True):
+        if remote_sync:
+            success, msg = auth_manager.save_user_config(data)
+            if not success:
+                messagebox.showerror("错误", f"配置同步失败: {msg}")
+                return False
         try:
             with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
@@ -69,11 +121,85 @@ class App:
         self.create_widgets()
         self.root.protocol("WM_DELETE_WINDOW", self.on_window_closing)
         
+        # 启动前先检查授权
+        if not self.ensure_license_valid():
+            self.root.destroy()
+            return
+        
+        # 修复: 启动时自动同步配置
+        if not self.refresh_config_from_server():
+            # 如果配置同步失败（例如网络问题但授权还在宽限期），是否允许继续？
+            # 策略：如果本地有配置，可以允许继续；否则提示错误
+            if not self.config or not self.config.get("sites"):
+                retry = messagebox.askretrycancel("配置同步失败", "无法从服务器获取配置，且本地无配置。\n请检查网络后重试。")
+                if not retry:
+                    self.root.destroy()
+                    return
+                # 如果重试，其实应该重新走一遍流程，这里简化处理，允许进入但可能配置为空
+            else:
+                 # 有本地缓存，提示一下但不退出
+                 pass
+
         # 初始化并启动托盘图标（常驻）
         self.start_tray_icon()
         
         # 启动授权心跳
         self.start_heartbeat()
+
+    def ensure_license_valid(self):
+        """启动时强制检查授权，无效则循环要求激活"""
+        while True:
+            code = auth_manager.load_license()
+            
+            # 检查是否过期
+            if auth_manager.is_license_expired():
+                 info = auth_manager.get_license_info()
+                 expire_date = (info or {}).get('expire_date')
+                 messagebox.showwarning("授权已过期", f"当前授权已于 {expire_date} 过期，请输入新的授权码续期")
+                 # 过期后虽然有 code，但也要进入激活流程
+            elif code:
+                # 有本地授权且未过期，验证有效性
+                # 为了不阻塞启动太久，这里设置较短超时，或者显示一个Splash
+                # 简单起见，同步阻塞检查
+                success, msg = auth_manager.heartbeat()
+                if success:
+                    return True
+                else:
+                    # 如果心跳失败，但可能是网络原因且在宽限期内
+                    # auth.py 的 heartbeat 已经处理了宽限期逻辑 (返回 True)
+                    # 所以如果返回 False，说明是真的无效或超过宽限期
+                    if "连接验证服务器失败" in msg or "网络连接异常" in msg:
+                         # 网络问题，且可能超过宽限期，或者没有本地缓存
+                         # 这里可以给用户一个选择：重试或输入新码
+                         retry = messagebox.askretrycancel("连接失败", f"无法连接验证服务器: {msg}\n是否重试？")
+                         if retry:
+                             continue
+                         else:
+                             return False
+                    
+                    messagebox.showwarning("授权失效", f"当前授权验证失败: {msg}\n请重新输入授权码")
+            
+            # 没有授权或验证失败，弹出输入框
+            # 如果是首次运行，提示欢迎
+            prompt_msg = "请输入授权码进行激活："
+            new_code = simpledialog.askstring("激活软件", prompt_msg, parent=self.root)
+            
+            if not new_code:
+                # 用户取消或关闭输入框，退出程序
+                return False
+                
+            new_code = new_code.strip()
+            if not new_code:
+                continue
+                
+            success, msg = auth_manager.activate(new_code)
+            if success:
+                info = auth_manager.get_license_info()
+                expire_date = info.get('expire_date', '未知')
+                messagebox.showinfo("激活成功", f"软件已激活，欢迎使用！\n有效期至: {expire_date}")
+                # 循环继续，再次 heartbeat 确认
+            else:
+                messagebox.showerror("激活失败", f"错误: {msg}")
 
     def start_heartbeat(self):
         def _loop():
@@ -86,6 +212,22 @@ class App:
                     self.root.after(3000, lambda: self.on_close(confirm=False))
                     break
         threading.Thread(target=_loop, daemon=True).start()
+
+    def refresh_config_from_server(self):
+        success, data = auth_manager.fetch_config()
+        if not success:
+            messagebox.showerror("配置获取失败", f"无法获取配置: {data}")
+            return False
+        payload = data if isinstance(data, dict) else {}
+        common_config = payload.get("common_config") or {}
+        user_config = payload.get("user_config") or {}
+        merged = _merge_configs(common_config, user_config)
+        if not ConfigManager.save(merged, remote_sync=False):
+            return False
+        self.config = ConfigManager.load()
+        self.refresh_site_list()
+        self.refresh_webhook_lists()
+        return True
 
     def start_tray_icon(self):
         # 创建图标图像
@@ -157,6 +299,11 @@ class App:
                 print(f"通知发送失败: {e}")
 
     def create_widgets(self):
+        # 底部版本号
+        version_frame = ttk.Frame(self.root)
+        version_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=5, pady=2)
+        ttk.Label(version_frame, text=APP_VERSION, foreground="gray").pack(side=tk.RIGHT)
+
         # 使用 Notebook 实现多 Tab 布局
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
@@ -181,10 +328,75 @@ class App:
         self.notebook.add(self.log_tab, text="运行日志")
         self.init_log_tab(self.log_tab)
 
-        # Tab 5: 使用说明
+        # Tab 5: 用户信息
+        self.user_tab = ttk.Frame(self.notebook, padding=5)
+        self.notebook.add(self.user_tab, text="用户信息")
+        self.init_user_tab(self.user_tab)
+
+        # Tab 6: 使用说明
         self.help_tab = ttk.Frame(self.notebook, padding=5)
         self.notebook.add(self.help_tab, text="使用说明")
         self.init_help_tab(self.help_tab)
+
+    def init_user_tab(self, parent):
+        info_frame = ttk.LabelFrame(parent, text="当前授权信息", padding=20)
+        info_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Grid layout for info
+        ttk.Label(info_frame, text="激活码:", font=("微软雅黑", 10, "bold")).grid(row=0, column=0, sticky='e', padx=10, pady=10)
+        self.lbl_code = ttk.Entry(info_frame, font=("Consolas", 10), width=40, state='readonly')
+        self.lbl_code.grid(row=0, column=1, sticky='w', padx=10, pady=10)
+        
+        ttk.Label(info_frame, text="设备机器码:", font=("微软雅黑", 10, "bold")).grid(row=1, column=0, sticky='e', padx=10, pady=10)
+        self.lbl_machine = ttk.Entry(info_frame, font=("Consolas", 10), width=40, state='readonly')
+        self.lbl_machine.grid(row=1, column=1, sticky='w', padx=10, pady=10)
+        
+        ttk.Label(info_frame, text="有效期至:", font=("微软雅黑", 10, "bold")).grid(row=2, column=0, sticky='e', padx=10, pady=10)
+        self.lbl_expire = ttk.Label(info_frame, text="Loading...", font=("Consolas", 10))
+        self.lbl_expire.grid(row=2, column=1, sticky='w', padx=10, pady=10)
+        
+        ttk.Label(info_frame, text="当前状态:", font=("微软雅黑", 10, "bold")).grid(row=3, column=0, sticky='e', padx=10, pady=10)
+        self.lbl_license_status = ttk.Label(info_frame, text="Loading...", font=("微软雅黑", 10))
+        self.lbl_license_status.grid(row=3, column=1, sticky='w', padx=10, pady=10)
+        
+        btn_frame = ttk.Frame(info_frame)
+        btn_frame.grid(row=4, column=0, columnspan=2, pady=20)
+        
+        ttk.Button(btn_frame, text="刷新信息", command=self.refresh_user_info).pack(side=tk.LEFT, padx=10)
+        ttk.Button(btn_frame, text="复制机器码", command=self.copy_machine_id).pack(side=tk.LEFT, padx=10)
+        
+        self.refresh_user_info()
+
+    def refresh_user_info(self):
+        info = auth_manager.get_license_info()
+        # 尝试从 info 获取 code，如果 info 为空（未激活），则 code 可能为 None
+        code = info.get('code', '未激活')
+        machine_id = auth_manager.machine_id
+        expire_date = info.get('expire_date', '未知')
+        
+        # Update Entry widgets (need to set state to normal first)
+        self.lbl_code.config(state='normal')
+        self.lbl_code.delete(0, tk.END)
+        self.lbl_code.insert(0, str(code))
+        self.lbl_code.config(state='readonly')
+        
+        self.lbl_machine.config(state='normal')
+        self.lbl_machine.delete(0, tk.END)
+        self.lbl_machine.insert(0, str(machine_id))
+        self.lbl_machine.config(state='readonly')
+        
+        self.lbl_expire.config(text=str(expire_date))
+        
+        # Check validity
+        if not code or code == '未激活':
+             self.lbl_license_status.config(text="未激活", foreground="red")
+        else:
+             self.lbl_license_status.config(text="已激活", foreground="green")
+
+    def copy_machine_id(self):
+        self.root.clipboard_clear()
+        self.root.clipboard_append(auth_manager.machine_id)
+        messagebox.showinfo("提示", "机器码已复制到剪贴板")
 
     def init_monitor_tab(self, parent):
         # 顶部控制区
@@ -226,14 +438,16 @@ class App:
 
     def init_site_tab(self, parent):
         # 站点列表
-        columns = ("name", "url", "user")
+        columns = ("name", "url", "user", "status")
         self.tree = ttk.Treeview(parent, columns=columns, show='headings', selectmode='browse')
         self.tree.heading("name", text="站点名称")
         self.tree.heading("url", text="登录地址")
         self.tree.heading("user", text="用户名")
+        self.tree.heading("status", text="监控状态")
         self.tree.column("name", width=150)
-        self.tree.column("url", width=400)
-        self.tree.column("user", width=150)
+        self.tree.column("url", width=350)
+        self.tree.column("user", width=120)
+        self.tree.column("status", width=80, anchor='center')
         
         scrollbar = ttk.Scrollbar(parent, orient=tk.VERTICAL, command=self.tree.yview)
         self.tree.configure(yscroll=scrollbar.set)
@@ -241,6 +455,15 @@ class App:
         self.tree.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.tree.bind('<Double-1>', self.edit_site)
+        self.tree.bind('<Button-1>', self.on_tree_click)
+        
+        # 右键菜单
+        self.site_context_menu = tk.Menu(self.tree, tearoff=0)
+        self.site_context_menu.add_command(label="编辑", command=self.edit_site)
+        self.site_context_menu.add_command(label="删除", command=self.delete_site)
+        self.site_context_menu.add_separator()
+        self.site_context_menu.add_command(label="启用/禁用监控", command=self.toggle_site_status)
+        self.tree.bind("<Button-3>", self.show_site_context_menu)
         
         btn_frame = ttk.Frame(parent, padding=5)
         btn_frame.pack(side=tk.BOTTOM, fill=tk.X)
@@ -248,15 +471,63 @@ class App:
         ttk.Button(btn_frame, text="添加站点", command=self.add_site).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="编辑选中", command=self.edit_site).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="删除选中", command=self.delete_site).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="启用/禁用", command=self.toggle_site_status).pack(side=tk.LEFT, padx=5)
         
         self.refresh_site_list()
+
+    def show_site_context_menu(self, event):
+        try:
+            item = self.tree.identify_row(event.y)
+            if item:
+                self.tree.selection_set(item)
+                self.site_context_menu.post(event.x_root, event.y_root)
+        except:
+            pass
+
+    def on_tree_click(self, event):
+        try:
+            region = self.tree.identify_region(event.x, event.y)
+            if region == 'cell':
+                column = self.tree.identify_column(event.x)
+                if column == '#4':  # Status column
+                    item_id = self.tree.identify_row(event.y)
+                    if item_id:
+                        self.toggle_site_status(item_id)
+        except Exception:
+            pass
+
+    def toggle_site_status(self, item_id=None):
+        if not item_id:
+            sel = self.tree.selection()
+            if not sel: return
+            item_id = sel[0]
+        
+        item = self.tree.item(item_id)
+        if not item or not item['values']: return
+        name = item['values'][0]
+        
+        site = next((s for s in self.config['sites'] if s['name'] == name), None)
+        if site:
+            # 切换状态，默认为 True
+            current_status = site.get('enabled', True)
+            site['enabled'] = not current_status
+            ConfigManager.save(self.config)
+            self.refresh_site_list()
+            
+            # 尝试恢复选中
+            for child in self.tree.get_children():
+                if self.tree.item(child)['values'][0] == name:
+                    self.tree.selection_set(child)
+                    self.tree.focus(child)
+                    break
+
 
     def init_settings_tab(self, parent):
         # 1. 运行参数
         param_frame = ttk.LabelFrame(parent, text="基础设置", padding=10)
         param_frame.pack(fill=tk.X, pady=5)
         
-        ttk.Label(param_frame, text="监控轮询间隔 (秒):").grid(row=0, column=0, padx=5, sticky='w')
+        ttk.Label(param_frame, text="检查间隔 (秒):").grid(row=0, column=0, padx=5, sticky='w')
         self.interval_var = tk.IntVar(value=self.config.get('interval', 60))
         ttk.Entry(param_frame, textvariable=self.interval_var, width=10).grid(row=0, column=1, padx=5, sticky='w')
         ttk.Label(param_frame, text="(最低 30 秒)").grid(row=0, column=2, padx=5, sticky='w')
@@ -319,32 +590,49 @@ class App:
         self.log_text.pack(fill=tk.BOTH, expand=True)
 
     def init_help_tab(self, parent):
-        help_text = """
-【租帮宝 - 用户操作指南】
+        help_text = ""
+        try:
+            readme_path = os.path.join(os.path.dirname(CONFIG_FILE), 'README.md')
+            if os.path.exists(readme_path):
+                with open(readme_path, 'r', encoding='utf-8') as f:
+                    help_text = f.read()
+        except Exception as e:
+            print(f"读取 README.md 失败: {e}")
 
-1. 快速开始
-   - 在“站点管理”中添加您的后台账号。
-   - 在“高级设置”中配置接收通知的 Webhook 地址（支持企业微信和飞书）。
-   - 切换回“运行监控”页，点击“启动监控服务”。
+        if not help_text:
+            help_text = """
+【租帮宝 - 使用说明】
 
-2. 运行监控
-   - 列表会实时显示各平台的待处理订单数。
-   - 双击列表项或查看“操作”列，可快速跳转到后台处理。
-   - 状态栏显示服务运行状态。
+一、首次使用（必须激活）
+   - 启动后按提示输入授权码完成激活。
+   - 如果授权已过期，会先提示“已过期”，再让你输入新的授权码。
+   - 需要报备设备信息时，到“用户信息”页点击“复制机器码”发给管理员。
 
-3. 桌面交互
-   - 点击右上角关闭按钮，可以选择“最小化到托盘”或“退出程序”。
-   - 托盘图标（右下角）常驻运行，右键可显示主界面或退出。
-   - 有新订单或需要人工介入时，右下角会弹出气泡提示（需在高级设置中开启）。
+二、添加站点
+   - 打开“站点管理”页，点击“添加站点”。
+   - 常规情况下只需要填写：站点名称、登录地址、账号、密码、订单地址。
+   - 站点账号密码建议独立使用；多处共用同一账号容易互相顶号，导致反复掉线/重复人工登录。
+   - 如果站点需要额外的页面定位配置（用于识别订单数量/跳转链接），联系交付人员协助配置。
 
-4. 浏览器辅助
-   - 默认浏览器在后台运行。
-   - 如果遇到验证码或需要人工登录，点击“显示浏览器界面”。
-   - 操作完成后，点击“隐藏/移出屏幕”即可。
+三、通知与运行策略（可选但建议）
+   - 打开“高级设置”，添加企业微信/飞书的 Webhook 地址（支持多个）。
+   - Webhook 地址怎么拿：
+     - 企业微信：群聊 → 右上角设置 → 群机器人 → 添加机器人 → 复制 Webhook
+     - 飞书：群聊 → 群设置 → 机器人 → 添加机器人 → 自定义机器人 → 复制 Webhook
+   - 勾选“开启桌面气泡通知”，电脑端会弹出提醒。
+   - 无头模式：一般在当天已成功登录一次、并且重启监控服务后开启才明显生效；效果是隐藏浏览器窗口，但无法人工介入登录。
+   - 需要手动登录/验证码时，关闭无头模式，并使用“显示浏览器界面”完成操作。
+   - 可设置检查间隔与夜间免打扰时段。
 
-5. 常见问题
-   - 为什么显示 0 单？可能是因为账号未登录或确实没有订单。尝试显示浏览器界面确认登录状态。
-   - 为什么收不到通知？请检查 Webhook 地址是否正确，以及是否开启了通知开关。
+四、启动监控与处理订单
+   - 回到“运行监控”页，点击“启动监控服务”。
+   - 双击列表项可快速打开后台处理。
+   - 操作完成后，可“隐藏/移出屏幕”，并允许软件最小化到托盘后台运行。
+
+五、常见问题
+   - 显示 0 单：可能确实没有订单；也可能需要重新登录。先点“显示浏览器界面”确认。
+   - 收不到通知：确认已添加 Webhook 地址，且群机器人可正常发消息。
+   - 找不到窗口：检查右下角托盘图标，右键可“显示主界面/退出”。
         """
         txt = scrolledtext.ScrolledText(parent, font=('微软雅黑', 10), padx=20, pady=20)
         txt.pack(fill=tk.BOTH, expand=True)
@@ -356,8 +644,9 @@ class App:
     def refresh_site_list(self):
         for item in self.tree.get_children():
             self.tree.delete(item)
-        for site in self.config['sites']:
-            self.tree.insert('', 'end', values=(site['name'], site['login_url'], site['username']))
+        for site in self.config.get('sites', []):
+            status = "启用" if site.get('enabled', True) else "禁用"
+            self.tree.insert('', 'end', values=(site.get('name', ''), site.get('login_url', ''), site.get('username', ''), status))
 
     def refresh_webhook_lists(self):
         self.webhook_listbox.delete(0, tk.END)
@@ -441,6 +730,9 @@ class App:
         item_id = None
         if event is not None:
             try:
+                # 拦截状态列的双击
+                if self.tree.identify_column(event.x) == '#4':
+                    return
                 item_id = self.tree.identify_row(event.y)
             except Exception:
                 item_id = None
@@ -477,11 +769,17 @@ class App:
     def open_site_editor(self, site_data=None):
         edit_win = tk.Toplevel(self.root)
         edit_win.title("编辑站点" if site_data else "新增站点")
-        edit_win.geometry("600x600")
+        edit_win.geometry("600x650")
+        
+        row = 0
+        
+        # 启用状态
+        enabled_var = tk.BooleanVar(value=site_data.get('enabled', True) if site_data else True)
+        ttk.Checkbutton(edit_win, text="启用此站点监控", variable=enabled_var).grid(row=row, column=1, sticky='w', padx=10, pady=5)
+        row += 1
         
         fields = [("站点名称", "name"), ("登录地址", "login_url"), ("用户名", "username"), ("密码", "password")]
         entries = {}
-        row = 0
         for label, key in fields:
             ttk.Label(edit_win, text=label).grid(row=row, column=0, padx=10, pady=5, sticky='e')
             entry = ttk.Entry(edit_win, width=50)
@@ -530,9 +828,13 @@ class App:
 
         def save():
             new_data = {}
+            # 保存启用状态
+            new_data['enabled'] = enabled_var.get()
+            
             for k, e in entries.items():
                 new_data[k] = e.get()
-                if not new_data[k] and k != "password":
+                # 仅 name 和 login_url 为必填
+                if not new_data[k] and k in ("name", "login_url"):
                     messagebox.showerror("错误", f"{k} 不能为空")
                     return
             
@@ -812,10 +1114,36 @@ class App:
             webbrowser.open(link)
 
     def start_process(self):
+        # 强制检查账号密码
+        sites = self.config.get('sites', [])
+        if not sites:
+            messagebox.showwarning("启动失败", "站点列表为空，请先同步或添加站点")
+            return
+
+        missing_creds = []
+        for site in sites:
+            # 如果站点未启用监控，跳过检查
+            if not site.get('enabled', True):
+                continue
+            if not site.get('username') or not site.get('password'):
+                missing_creds.append(site.get('name', '未知站点'))
+
+        if missing_creds:
+            msg = "以下站点未设置账号或密码，请先完成设置：\n\n" + "\n".join(missing_creds)
+            messagebox.showwarning("启动失败", msg)
+            self.notebook.select(self.site_tab) # 自动切换到站点设置页
+            return
+
         self.is_stopping = False
         self.log("\n=== 正在启动监控服务... ===\n")
         self.lbl_status.config(text="状态: 运行中", foreground="green")
         self.btn_start.config(text="停止监控服务")
+        success, msg = auth_manager.heartbeat()
+        if not success:
+            messagebox.showwarning("授权失效", f"授权验证失败: {msg}")
+            self.lbl_status.config(text="状态: 未授权", foreground="red")
+            self.btn_start.config(text="启动监控服务")
+            return
         
         if getattr(sys, 'frozen', False):
             # 优先检查 backend 目录（onedir 模式）
@@ -863,7 +1191,8 @@ class App:
                 # 使用 after 在主线程更新 UI
                 self.root.after(0, lambda l=line: self.log(l))
         except Exception as e:
-            self.root.after(0, lambda: self.log(f"\n[系统] 读取进程输出出错: {e}\n"))
+            err = str(e)
+            self.root.after(0, lambda m=err: self.log(f"\n[系统] 读取进程输出出错: {m}\n"))
         finally:
             # 进程自然结束（非手动停止）
             if not self.is_stopping:
@@ -1051,7 +1380,8 @@ class App:
                 else:
                     self.root.after(0, lambda: self.log(f"指令失败: {resp.text}\n"))
             except Exception as e:
-                self.root.after(0, lambda: self.log(f"请求失败 (服务可能未就绪): {e}\n"))
+                err = str(e)
+                self.root.after(0, lambda m=err: self.log(f"请求失败 (服务可能未就绪): {m}\n"))
         threading.Thread(target=_req, daemon=True).start()
 
 if __name__ == '__main__':
@@ -1082,7 +1412,11 @@ if __name__ == '__main__':
             code = code.strip()
             success, data = auth_manager.activate(code)
             if success:
-                expire = data.get('expire_date', '未知')
+                license_info = data.get('license') if isinstance(data, dict) else None
+                expire = (license_info or {}).get('expire_date', '未知')
+                if expire == '未知':
+                    info = auth_manager.get_license_info()
+                    expire = info.get('expire_date', '未知')
                 messagebox.showinfo("激活成功", f"授权激活成功！\n有效期至: {expire}", parent=root)
                 break
             else:

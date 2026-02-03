@@ -9,6 +9,8 @@ venv/
 build/
 dist/
 dist_new/
+dist_dev/
+dist_prod/
 *.spec
 .vscode/
 .idea/
@@ -18,3 +20,5 @@ license.json
 playwright-browsers/
 *.zip
 .env
+browser_data/
+cookies/
