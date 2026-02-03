@@ -749,6 +749,10 @@ def dashboard():
     threshold = datetime.now() - timedelta(minutes=10)
     total_devices = Device.query.filter(Device.last_heartbeat >= threshold).count()
 
+    # 加载通用配置 (用于前端显示)
+    common_config = _load_common_config()
+    common_config_json = json.dumps(common_config, indent=2, ensure_ascii=False)
+
     return render_template(
         'dashboard.html',
         licenses=licenses,
@@ -757,8 +761,47 @@ def dashboard():
         now=datetime.now(),
         csrf_token=ensure_csrf_token(),
         permanent_cutoff=PERMANENT_EXPIRE_DATE,
-        remark_filter=remark_filter
+        remark_filter=remark_filter,
+        common_config_json=common_config_json
     )
+
+
+@app.route('/dashboard/config/common', methods=['POST'])
+@login_required
+def update_common_config():
+    if not validate_csrf_token():
+        flash('请求无效，请刷新页面重试', 'danger')
+        return redirect(url_for('dashboard'))
+    
+    config_json = request.form.get('common_config')
+    if not config_json:
+        flash('配置内容不能为空', 'danger')
+        return redirect(url_for('dashboard'))
+        
+    try:
+        config_data = json.loads(config_json)
+        if not isinstance(config_data, dict):
+             flash('配置必须是 JSON 对象', 'danger')
+             return redirect(url_for('dashboard'))
+        
+        # 保存到 KeyStore
+        payload = json.dumps(config_data, ensure_ascii=False)
+        store = KeyStore.query.get('common_config')
+        if store:
+            store.value = payload
+        else:
+            store = KeyStore(key='common_config', value=payload)
+            db.session.add(store)
+        db.session.commit()
+        flash('通用配置已更新', 'success')
+    except json.JSONDecodeError:
+        flash('配置内容不是有效的 JSON 格式', 'danger')
+    except Exception as e:
+        db.session.rollback()
+        flash(f'更新失败: {str(e)}', 'danger')
+        
+    return redirect(url_for('dashboard'))
+
 
 
 @app.route('/dashboard/generate', methods=['POST'])

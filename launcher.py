@@ -196,6 +196,8 @@ class App:
             if success:
                 info = auth_manager.get_license_info()
                 expire_date = info.get('expire_date', '未知')
+                # 激活成功后，自动尝试获取通用配置
+                self.refresh_config_from_server()
                 messagebox.showinfo("激活成功", f"软件已激活，欢迎使用！\n有效期至: {expire_date}")
                 # 循环继续，再次 heartbeat 确认
             else:
@@ -213,7 +215,7 @@ class App:
                     break
         threading.Thread(target=_loop, daemon=True).start()
 
-    def refresh_config_from_server(self):
+    def refresh_config_from_server(self, show_success=False):
         success, data = auth_manager.fetch_config()
         if not success:
             messagebox.showerror("配置获取失败", f"无法获取配置: {data}")
@@ -227,6 +229,8 @@ class App:
         self.config = ConfigManager.load()
         self.refresh_site_list()
         self.refresh_webhook_lists()
+        if show_success:
+            messagebox.showinfo("成功", "通用配置获取并更新成功！")
         return True
 
     def start_tray_icon(self):
@@ -472,6 +476,7 @@ class App:
         ttk.Button(btn_frame, text="编辑选中", command=self.edit_site).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="删除选中", command=self.delete_site).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="启用/禁用", command=self.toggle_site_status).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="获取通用配置", command=lambda: self.refresh_config_from_server(show_success=True)).pack(side=tk.LEFT, padx=5)
         
         self.refresh_site_list()
 

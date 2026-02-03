@@ -70,6 +70,9 @@
                         <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#createLicenseModal">
                             <i class="fas fa-plus me-1"></i> 新建授权
                         </button>
+                        <button class="btn btn-info text-white" data-bs-toggle="modal" data-bs-target="#commonConfigModal">
+                            <i class="fas fa-cog me-1"></i> 通用配置
+                        </button>
                         <a href="{{ url_for('export_licenses') }}" class="btn btn-outline-secondary">
                             <i class="fas fa-download me-1"></i> 导出
                         </a>
@@ -313,6 +316,36 @@
                     <div class="modal-footer">
                         <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
                         <button type="submit" class="btn btn-primary">开始导入</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- 通用配置 Modal -->
+    <div class="modal fade" id="commonConfigModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">通用配置管理</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <form action="{{ url_for('update_common_config') }}" method="POST">
+                    <div class="modal-body">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                        <div class="alert alert-info border small">
+                            <i class="fas fa-info-circle me-1"></i>
+                            在此处配置的 JSON 内容将被所有客户端在激活或更新配置时获取。
+                            请确保格式为有效的 JSON 对象。
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">配置内容 (JSON)</label>
+                            <textarea name="common_config" class="form-control font-monospace" rows="15" required>{{ common_config_json }}</textarea>
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                        <button type="submit" class="btn btn-primary">保存配置</button>
                     </div>
                 </form>
             </div>

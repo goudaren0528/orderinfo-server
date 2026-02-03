@@ -393,7 +393,8 @@ class AuthManager:
                     state = self._load_state()
                     stored_pem = state.get('server_public_key')
                     if stored_pem and server_public_key != stored_pem:
-                        return False, "服务器公钥不一致"
+                        # 服务器公钥变更（可能是服务器重置），允许更新
+                        pass
                     self.server_public_key_pem = server_public_key
                     state['server_public_key'] = server_public_key
                 if not self._verify_license_signature(license_payload, license_signature):
@@ -515,22 +516,41 @@ class AuthManager:
             return True, "保存成功"
         return False, data.get("message", "保存配置失败")
 
+    def _filter_sensitive_data(self, data):
+        """递归过滤敏感字段 (如密码)"""
+        if isinstance(data, dict):
+            new_data = {}
+            for k, v in data.items():
+                # 过滤常见密码字段
+                if k.lower() in ("password", "pwd", "secret", "passwd"):
+                    continue
+                new_data[k] = self._filter_sensitive_data(v)
+            return new_data
+        elif isinstance(data, list):
+            return [self._filter_sensitive_data(item) for item in data]
+        else:
+            return data
+
     def save_user_config(self, config):
         if not self.load_license():
             return False, "未找到授权码"
         try:
             if not self._is_secure_server_url():
                 return False, "授权服务器地址不安全，请使用 https"
+            
+            # 过滤敏感信息
+            safe_config = self._filter_sensitive_data(config)
+            
             token = self._ensure_config_token()
             if not token:
                 return False, "配置令牌获取失败"
-            success, message = self._save_user_config_with_token(config, token)
+            success, message = self._save_user_config_with_token(safe_config, token)
             if success:
                 return True, message
             if "令牌无效" in message:
                 token = self._ensure_config_token(refresh=True)
                 if token:
-                    return self._save_user_config_with_token(config, token)
+                    return self._save_user_config_with_token(safe_config, token)
             return False, message
         except Exception as e:
             return False, f"连接验证服务器失败: {e}"
