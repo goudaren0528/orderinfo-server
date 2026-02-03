@@ -108,6 +108,17 @@ class ApiAudit(db.Model):
     reason = db.Column(db.String(255))
 
 
+class ConfigToken(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    license_code = db.Column(db.String(64), nullable=False)
+    machine_id = db.Column(db.String(128), nullable=False)
+    token = db.Column(db.String(64), nullable=False)
+    expire_ts = db.Column(db.Integer, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.now)
+    
+    __table_args__ = (db.Index('idx_config_token', 'license_code', 'machine_id'),)
+
+
 # --- 辅助函数 ---
 
 def login_required(f):
@@ -505,19 +516,37 @@ def _audit_request(endpoint, code, machine_id, ok, reason):
 def _issue_config_token(code, machine_id):
     token = secrets.token_urlsafe(32)
     expire_ts = int(time.time()) + 600
-    config_token_store[(code, machine_id)] = (token, expire_ts)
+    
+    # 查找现有 Token 或创建新的
+    record = ConfigToken.query.filter_by(license_code=code, machine_id=machine_id).first()
+    if record:
+        record.token = token
+        record.expire_ts = expire_ts
+        record.created_at = datetime.now()
+    else:
+        record = ConfigToken(
+            license_code=code,
+            machine_id=machine_id,
+            token=token,
+            expire_ts=expire_ts
+        )
+        db.session.add(record)
+    
+    db.session.commit()
     return token, expire_ts
 
 
 def _verify_config_token(code, machine_id, token):
-    record = config_token_store.get((code, machine_id))
+    record = ConfigToken.query.filter_by(license_code=code, machine_id=machine_id).first()
     if not record:
         return False
-    stored_token, expire_ts = record
-    if int(time.time()) > expire_ts:
-        config_token_store.pop((code, machine_id), None)
+        
+    if int(time.time()) > record.expire_ts:
+        db.session.delete(record)
+        db.session.commit()
         return False
-    return secrets.compare_digest(stored_token, token or "")
+        
+    return secrets.compare_digest(record.token, token or "")
 
 
 def _validate_activate_request(data):
