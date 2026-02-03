@@ -190,14 +190,29 @@ def canonical_json(data):
     return json.dumps(data, separators=(',', ':'), sort_keys=True)
 
 
+def format_pem(key_text):
+    """修复环境变量中可能存在的 PEM 格式问题 (如将换行符转义为 \\n)"""
+    if not key_text:
+        return None
+    return key_text.replace('\\n', '\n').strip()
+
+
 def load_license_keys():
     global _license_private_key, _license_public_key
     if _license_private_key and _license_public_key:
         return _license_private_key, _license_public_key
+    
     if LICENSE_PRIVATE_KEY and LICENSE_PUBLIC_KEY:
-        _license_private_key = serialization.load_pem_private_key(LICENSE_PRIVATE_KEY.encode(), password=None)
-        _license_public_key = serialization.load_pem_public_key(LICENSE_PUBLIC_KEY.encode())
-        return _license_private_key, _license_public_key
+        try:
+            private_pem = format_pem(LICENSE_PRIVATE_KEY)
+            public_pem = format_pem(LICENSE_PUBLIC_KEY)
+            _license_private_key = serialization.load_pem_private_key(private_pem.encode(), password=None)
+            _license_public_key = serialization.load_pem_public_key(public_pem.encode())
+            return _license_private_key, _license_public_key
+        except Exception as e:
+            app.logger.error(f"Failed to load keys from environment variables: {e}")
+            # 如果环境变量中的 key 无效，尝试从数据库加载或生成新的（视情况而定，这里继续往下走）
+            
     store_private = KeyStore.query.get('license_private_key')
     store_public = KeyStore.query.get('license_public_key')
     if store_private and store_public:
@@ -912,8 +927,23 @@ def get_license_devices(code):
 
 # --- API 接口 ---
 
+def api_exception_handler(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        try:
+            return f(*args, **kwargs)
+        except Exception as e:
+            app.logger.error(f"API Error: {str(e)}", exc_info=True)
+            return jsonify({
+                "status": "error",
+                "message": f"Server Error: {str(e)}",
+                "type": type(e).__name__
+            }), 500
+    return decorated_function
+
 
 @app.route('/api/activate', methods=['POST'])
+@api_exception_handler
 def activate():
     client_ip = get_client_ip()
     if is_rate_limited(client_ip, 'activate', 60, 300):
@@ -942,6 +972,7 @@ def activate():
 
 
 @app.route('/api/heartbeat', methods=['POST'])
+@api_exception_handler
 def heartbeat():
     client_ip = get_client_ip()
     if is_rate_limited(client_ip, 'heartbeat', 120, 300):
@@ -980,6 +1011,7 @@ def heartbeat():
 
 
 @app.route('/api/config/fetch', methods=['POST'])
+@api_exception_handler
 def fetch_config():
     client_ip = get_client_ip()
     if is_rate_limited(client_ip, 'config_fetch', 120, 300):

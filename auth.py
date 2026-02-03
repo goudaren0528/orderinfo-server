@@ -101,7 +101,7 @@ def _crypt_unprotect(data):
 
 class AuthManager:
     def __init__(self, server_url=None, license_file=None):
-        self.server_url = server_url or DEFAULT_SERVER_URL
+        self.server_url = (server_url or DEFAULT_SERVER_URL).strip().rstrip('/')
         self.license_file = license_file or self._get_license_file_path()
         self.machine_id = self._get_machine_id()
         self.current_code = None
@@ -380,7 +380,11 @@ class AuthManager:
                 "X-Device-Signature": self._sign_body(body.encode())
             }
             response = requests.post(url, data=body, headers=headers, timeout=10)
-            data = response.json()
+            try:
+                data = response.json()
+            except json.decoder.JSONDecodeError:
+                return False, f"服务器响应异常 (Status: {response.status_code}): {response.text[:100]}"
+            
             if response.status_code == 200 and data.get("status") == "success":
                 license_payload = data.get('license')
                 license_signature = data.get('license_signature')
