@@ -223,9 +223,60 @@ class App:
         payload = data if isinstance(data, dict) else {}
         common_config = payload.get("common_config") or {}
         user_config = payload.get("user_config") or {}
+        
+        # 获取使用说明内容
+        help_content = payload.get("help_content", "")
+        if hasattr(self, 'update_help_content'):
+             self.update_help_content(help_content)
+
+        local_config = ConfigManager.load()
+        server_has_sites = len(user_config.get('sites', [])) > 0
+        local_has_sites = len(local_config.get('sites', [])) > 0
+        
+        should_sync_to_remote = False
+        
+        # 1. 场景三：服务器配置为空，但本地有配置 -> 保留本地，并标记需要同步到服务器
+        if not server_has_sites and local_has_sites:
+            print("[Info] 服务器配置为空，保留本地站点配置并计划上传")
+            user_config['sites'] = local_config.get('sites', [])
+            should_sync_to_remote = True
+        
+        # 2. 场景二：服务器和本地都有配置 -> 智能合并
+        # 用户要求：如果站点、账号一致，不要覆盖本地（因为本地有密码，服务器没有）
+        # 我们的策略：
+        # - 以服务器配置为基础（因为可能包含了管理员的修改或用户在其他机器的修改）
+        # - 但是！如果本地存在同名站点，且关键信息（URL/账号）一致，则保留本地的密码等敏感信息
+        # - 甚至，如果本地有些字段（如密码）存在而服务器没有，务必回填
+        
         merged = _merge_configs(common_config, user_config)
+        
+        if local_config.get('sites'):
+            local_sites_map = {s.get('name'): s for s in local_config['sites'] if s.get('name')}
+            for site in merged.get('sites', []):
+                local_site = local_sites_map.get(site.get('name'))
+                if local_site:
+                    # 关键信息一致性检查（可选，目前假设同名即为同一站点）
+                    # 回填敏感字段
+                    sensitive_keys = ["password", "login_password", "pay_password", "pwd", "secret", "passwd"]
+                    for key in sensitive_keys:
+                        if key in local_site and (key not in site or not site[key]):
+                            site[key] = local_site[key]
+                            
+                    # 额外保护：如果用户说“配置消失”，可能是服务器返回了被篡改或空的非敏感字段
+                    # 但这里我们信任服务器返回的结构，只补全密码。
+                    # 如果服务器返回的站点比本地少（删除了站点），这里也会删除。
+                    # 如果用户希望本地站点永远不被服务器删除，那逻辑就复杂了，目前假设同步删除是预期的。
+
+        # 保存合并后的配置到本地
         if not ConfigManager.save(merged, remote_sync=False):
             return False
+            
+        # 如果是场景三，或者本地有新变更需要同步上去（虽然这里主要是拉取，但如果是单向覆盖导致本地更新，不需要推回去；
+        # 但如果是“服务器空本地有”，则必须推上去）
+        if should_sync_to_remote:
+             print("[Info] 正在将本地配置同步到服务器...")
+             ConfigManager.save(merged, remote_sync=True)
+
         self.config = ConfigManager.load()
         self.refresh_site_list()
         self.refresh_webhook_lists()
@@ -595,17 +646,11 @@ class App:
         self.log_text.pack(fill=tk.BOTH, expand=True)
 
     def init_help_tab(self, parent):
-        help_text = ""
-        try:
-            readme_path = os.path.join(os.path.dirname(CONFIG_FILE), 'README.md')
-            if os.path.exists(readme_path):
-                with open(readme_path, 'r', encoding='utf-8') as f:
-                    help_text = f.read()
-        except Exception as e:
-            print(f"读取 README.md 失败: {e}")
-
-        if not help_text:
-            help_text = """
+        self.help_text_widget = scrolledtext.ScrolledText(parent, font=('微软雅黑', 10), padx=20, pady=20)
+        self.help_text_widget.pack(fill=tk.BOTH, expand=True)
+        
+        # 默认说明
+        default_help_text = """
 【租帮宝 - 使用说明】
 
 一、首次使用（必须激活）
@@ -639,10 +684,16 @@ class App:
    - 收不到通知：确认已添加 Webhook 地址，且群机器人可正常发消息。
    - 找不到窗口：检查右下角托盘图标，右键可“显示主界面/退出”。
         """
-        txt = scrolledtext.ScrolledText(parent, font=('微软雅黑', 10), padx=20, pady=20)
-        txt.pack(fill=tk.BOTH, expand=True)
-        txt.insert(tk.END, help_text)
-        txt.configure(state='disabled')
+        self.help_text_widget.insert(tk.END, default_help_text)
+        self.help_text_widget.configure(state='disabled')
+
+    def update_help_content(self, content):
+        if not content:
+            return
+        self.help_text_widget.configure(state='normal')
+        self.help_text_widget.delete('1.0', tk.END)
+        self.help_text_widget.insert(tk.END, content)
+        self.help_text_widget.configure(state='disabled')
 
     # === 逻辑处理 ===
 

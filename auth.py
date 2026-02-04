@@ -115,6 +115,9 @@ class AuthManager:
         if getattr(sys, 'frozen', False):
             # exe 同级目录
             base_dir = os.path.dirname(sys.executable)
+            # 兼容后端 onedir 模式：如果在 backend 子目录下，优先读取上级目录的 license.json
+            if os.path.basename(base_dir).lower() == 'backend':
+                return os.path.join(os.path.dirname(base_dir), 'license.json')
         else:
             # 脚本同级目录
             base_dir = os.path.dirname(os.path.abspath(__file__))

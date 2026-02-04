@@ -1,5 +1,4 @@
 @echo off
-chcp 65001 >nul
 echo ==========================================
 echo      ZuBangBao - Build Script (DEV)
 echo ==========================================
@@ -25,14 +24,14 @@ if %errorlevel% neq 0 (
 )
 
 echo [3/4] Building Frontend (Launcher)...
-pyinstaller --noconfirm --log-level WARN --distpath "%BUILD_OUTPUT%" --onedir --windowed --name 租帮宝_v3 --add-data ".env;." --add-data "README.md;." --hidden-import=pystray launcher.py
+pyinstaller --noconfirm --log-level WARN --distpath "%BUILD_OUTPUT%" --onedir --windowed --name ��ﱦ_v3 --add-data ".env;." --add-data "README.md;." --hidden-import=pystray launcher.py
 if %errorlevel% neq 0 (
     echo [ERROR] Frontend build failed!
     exit /b %errorlevel%
 )
 
 echo [4/4] Assembling Environment...
-set "DIST_DIR=%BUILD_OUTPUT%\租帮宝_v3"
+set "DIST_DIR=%BUILD_OUTPUT%\��ﱦ_v3"
 
 if exist "%BUILD_OUTPUT%\OrderMonitor" (
     echo Deploying backend...
@@ -59,6 +58,6 @@ if exist "playwright-browsers" (
 echo.
 echo ==========================================
 echo      DEV Build Complete!
-echo      Output: %DIST_DIR%\租帮宝_v3.exe
+echo      Output: %DIST_DIR%\��ﱦ_v3.exe
 echo ==========================================
-pause
+rem pause

@@ -764,6 +764,12 @@ def logout():
     return redirect(url_for('login'))
 
 
+def _load_help_content():
+    store = KeyStore.query.get('help_content')
+    if not store:
+        return ""
+    return store.value
+
 @app.route('/dashboard')
 @login_required
 def dashboard():
@@ -781,6 +787,9 @@ def dashboard():
     # 加载通用配置 (用于前端显示)
     common_config = _load_common_config()
     common_config_json = json.dumps(common_config, indent=2, ensure_ascii=False)
+    
+    # 加载使用说明
+    help_content = _load_help_content()
 
     return render_template(
         'dashboard.html',
@@ -791,7 +800,8 @@ def dashboard():
         csrf_token=ensure_csrf_token(),
         permanent_cutoff=PERMANENT_EXPIRE_DATE,
         remark_filter=remark_filter,
-        common_config_json=common_config_json
+        common_config_json=common_config_json,
+        help_content=help_content
     )
 
 
@@ -831,6 +841,35 @@ def update_common_config():
         
     return redirect(url_for('dashboard'))
 
+
+
+@app.route('/dashboard/config/help', methods=['POST'])
+@login_required
+def update_help_content():
+    if not validate_csrf_token():
+        flash('请求无效，请刷新页面重试', 'danger')
+        return redirect(url_for('dashboard'))
+    
+    content = request.form.get('help_content')
+    if not content:
+        flash('说明内容不能为空', 'danger')
+        return redirect(url_for('dashboard'))
+        
+    try:
+        # 保存到 KeyStore
+        store = KeyStore.query.get('help_content')
+        if store:
+            store.value = content
+        else:
+            store = KeyStore(key='help_content', value=content)
+            db.session.add(store)
+        db.session.commit()
+        flash('使用说明已更新', 'success')
+    except Exception as e:
+        db.session.rollback()
+        flash(f'更新失败: {str(e)}', 'danger')
+        
+    return redirect(url_for('dashboard'))
 
 
 @app.route('/dashboard/generate', methods=['POST'])
@@ -1100,6 +1139,7 @@ def fetch_config():
     db.session.commit()
     common_config = _load_common_config()
     user_config = _load_license_config(code)
+    help_content = _load_help_content()
     config_ts = int(time.time())
     payload = {
         "code": code,
@@ -1115,6 +1155,7 @@ def fetch_config():
         "status": "success",
         "common_config": common_config,
         "user_config": user_config,
+        "help_content": help_content,
         "config_signature": signature,
         "config_ts": config_ts,
         "config_token": token,
