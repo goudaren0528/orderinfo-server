@@ -286,19 +286,23 @@ def sign_config_payload(payload):
 def verify_device_signature(public_key_pem):
     signature_b64 = request.headers.get('X-Device-Signature')
     if not signature_b64:
+        app.logger.warning("Signature verification failed: Missing X-Device-Signature header")
         return False, "missing"
     try:
         signature = base64.b64decode(signature_b64)
     except Exception:
+        app.logger.warning("Signature verification failed: Invalid base64 signature")
         return False, "invalid"
     body = request.get_data() or b""
     try:
         public_key = serialization.load_pem_public_key(public_key_pem.encode())
-    except Exception:
+    except Exception as e:
+        app.logger.warning(f"Signature verification failed: Invalid public key format. Error: {e}")
         return False, "invalid"
     try:
         public_key.verify(signature, body)
     except InvalidSignature:
+        app.logger.warning("Signature verification failed: Invalid signature (mismatch)")
         return False, "invalid"
     return True, ""
 
@@ -566,12 +570,15 @@ def _validate_activate_request(data):
     machine_id = data.get('machine_id')
     device_public_key = data.get('device_public_key')
     if not code or not machine_id or not device_public_key:
+        app.logger.warning(f"Activate failed: Missing params. Code={code}, MachineID={machine_id}")
         return None, _activation_error("参数不完整", 400)
     ok, reason = verify_request_nonce(data)
     if not ok:
+        app.logger.warning(f"Activate failed: Nonce verification failed. Reason: {reason}")
         return None, _activation_error("请求已失效", 401)
     ok, reason = verify_device_signature(device_public_key)
     if not ok:
+        app.logger.warning(f"Activate failed: Device signature failed. Reason: {reason}")
         return None, _activation_error("签名校验失败", 401)
     return (code, machine_id, device_public_key), None
 
@@ -1106,19 +1113,24 @@ def heartbeat():
     code = data.get('code')
     machine_id = data.get('machine_id')
     if not code or not machine_id:
+        app.logger.warning("Heartbeat failed: Missing code or machine_id")
         return jsonify({"status": "error", "message": "参数不完整"}), 400
 
     device = Device.query.filter_by(license_code=code, machine_id=machine_id).first()
 
     if not device:
+        app.logger.warning(f"Heartbeat failed: Device not found. Code={code}, MachineID={machine_id}")
         return jsonify({"status": "error", "message": "设备未激活或已掉线"}), 401
     if not device.public_key:
+        app.logger.warning(f"Heartbeat failed: Device has no public key. Code={code}, MachineID={machine_id}")
         return jsonify({"status": "error", "message": "设备未注册密钥"}), 401
     ok, reason = verify_request_nonce(data)
     if not ok:
+        app.logger.warning(f"Heartbeat failed: Nonce verification failed. Reason: {reason}")
         return jsonify({"status": "error", "message": "请求已失效"}), 401
     ok, reason = verify_device_signature(device.public_key)
     if not ok:
+        app.logger.warning(f"Heartbeat failed: Device signature failed. Reason: {reason}")
         return jsonify({"status": "error", "message": "签名校验失败"}), 401
 
     license_obj = License.query.get(code)
@@ -1126,8 +1138,10 @@ def heartbeat():
         app.logger.warning(f"Heartbeat failed: License '{code}' not found.")
         return jsonify({"status": "error", "message": "授权码无效"}), 403
     if license_obj.revoked:
+        app.logger.warning(f"Heartbeat failed: License '{code}' revoked.")
         return jsonify({"status": "error", "message": "授权码已作废"}), 403
     if datetime.now() > license_obj.expire_date:
+        app.logger.warning(f"Heartbeat failed: License '{code}' expired.")
         return jsonify({"status": "error", "message": "授权已过期"}), 403
 
     device.last_heartbeat = datetime.now()

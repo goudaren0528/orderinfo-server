@@ -417,7 +417,7 @@ class AuthManager:
                     self.server_public_key_pem = server_public_key
                     state['server_public_key'] = server_public_key
                 if not self._verify_license_signature(license_payload, license_signature):
-                    return False, "授权签名无效"
+                    return False, "授权签名无效（本地验证失败）"
                 self._save_license_payload(license_payload, license_signature)
                 state = self._load_state()
                 state['last_ok_ts'] = int(time.time())
