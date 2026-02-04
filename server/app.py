@@ -23,9 +23,21 @@ load_dotenv(override=True)
 
 # 配置
 app = Flask(__name__)
+
+# 智能识别数据库路径
+# 优先使用项目根目录下的 instance/auth.db (如果存在)，以保持与旧环境数据一致
+base_dir = os.path.dirname(os.path.abspath(__file__))
+root_instance_db = os.path.join(os.path.dirname(base_dir), 'instance', 'auth.db')
+
+default_db_uri = 'sqlite:///auth.db'
+if os.path.exists(root_instance_db):
+    # Windows 下绝对路径需要转义或正确处理
+    default_db_uri = f'sqlite:///{root_instance_db}'
+    print(f"Mapped database to root instance: {root_instance_db}")
+
 # 默认使用 SQLite，如果需要使用 Postgres，只需修改环境变量或此处配置
 # 例如: 'postgresql://user:password@localhost/dbname'
-app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'sqlite:///auth.db')
+app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', default_db_uri)
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.secret_key = os.environ.get('SECRET_KEY')
 ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD')
@@ -582,6 +594,7 @@ def _validate_device_request(data):
         return None, ("签名校验失败", 401)
     license_obj = License.query.get(code)
     if not license_obj:
+        app.logger.warning(f"Device request failed: License '{code}' not found.")
         return None, ("授权码无效", 403)
     if license_obj.revoked:
         return None, ("授权码已作废", 403)
@@ -630,6 +643,7 @@ def _save_license_config(code, config):
 def _get_valid_license(code):
     license_obj = License.query.get(code)
     if not license_obj:
+        app.logger.warning(f"License check failed: Code '{code}' not found in DB.")
         return None, _activation_error("授权码无效", 404)
     if license_obj.revoked:
         return None, _activation_error("授权码已作废", 403)
@@ -1109,6 +1123,7 @@ def heartbeat():
 
     license_obj = License.query.get(code)
     if not license_obj:
+        app.logger.warning(f"Heartbeat failed: License '{code}' not found.")
         return jsonify({"status": "error", "message": "授权码无效"}), 403
     if license_obj.revoked:
         return jsonify({"status": "error", "message": "授权码已作废"}), 403

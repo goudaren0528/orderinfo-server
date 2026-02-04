@@ -19,7 +19,7 @@ echo [IMPORTANT] Please ensure you have updated LICENSE_SERVER_URL in .env.prod 
 echo Current configuration:
 findstr "LICENSE_SERVER_URL" .env
 echo.
-timeout /t 5
+REM timeout /t 5
 
 echo [1/4] Cleaning old files...
 set "BUILD_OUTPUT=dist_prod"
@@ -34,7 +34,7 @@ if %errorlevel% neq 0 (
 )
 
 echo [3/4] Building Frontend (Launcher)...
-pyinstaller --noconfirm --log-level WARN --distpath "%BUILD_OUTPUT%" --onedir --windowed --name 租帮宝_v3 --add-data ".env;." --add-data "README.md;." --hidden-import=pystray launcher.py
+pyinstaller --noconfirm --log-level WARN --distpath "%BUILD_OUTPUT%" --onedir --windowed --name 租帮宝_v3 --icon "logo.ico" --add-data ".env;." --add-data "README.md;." --add-data "logo.ico;." --hidden-import=pystray launcher.py
 if %errorlevel% neq 0 (
     echo [ERROR] Frontend build failed!
     exit /b %errorlevel%
@@ -68,6 +68,6 @@ if exist "playwright-browsers" (
 echo.
 echo ==========================================
 echo      Production Build Complete!
-echo      Output: %DIST_DIR%\租帮宝_v3.exe
+echo Output: %DIST_DIR%\租帮宝_v3.exe
 echo ==========================================
-pause
+REM pause

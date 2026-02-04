@@ -276,21 +276,37 @@ class AuthManager:
         state = self._load_state()
         stored_pem = state.get('server_public_key')
         env_pem = os.environ.get('LICENSE_PUBLIC_KEY')
-        if stored_pem and env_pem and env_pem != stored_pem:
-            return
+        
+        # 即使有本地存储的公钥，也尝试从服务器更新，因为服务器可能重置了密钥
+        # 但我们不会在每次调用时都请求，只在初始化或验证失败时
+        
+        # 策略：如果 stored_pem 存在，先用它。但如果后续验证失败，会强制刷新。
+        # 这里我们先尝试获取最新的，如果获取失败则回退到 stored_pem
+        
         pem = stored_pem or env_pem
-        if not pem:
-            try:
-                url = f"{self.server_url}/api/public-key"
-                response = requests.get(url, timeout=10)
-                data = response.json() if response.status_code == 200 else {}
-                pem = data.get('public_key')
-            except Exception:
-                pem = None
+        
+        # 强制尝试从服务器获取最新公钥（如果 URL 可达）
+        try:
+            url = f"{self.server_url}/api/public-key"
+            response = requests.get(url, timeout=5) # 短超时
+            if response.status_code == 200:
+                data = response.json()
+                server_pem = data.get('public_key')
+                if server_pem:
+                    pem = server_pem
+                    # 更新本地缓存
+                    if server_pem != stored_pem:
+                        state['server_public_key'] = server_pem
+                        self._save_state()
+        except Exception:
+            pass
+
         if pem:
             self.server_public_key_pem = pem
-            state['server_public_key'] = pem
-            self._save_state()
+            # 确保保存到内存和状态
+            if pem != stored_pem:
+                state['server_public_key'] = pem
+                self._save_state()
 
     def _verify_license_signature(self, license_payload, signature):
         if not license_payload or not signature:

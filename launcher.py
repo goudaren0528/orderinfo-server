@@ -26,7 +26,7 @@ else:
     CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')
 
 APP_TITLE = "租帮宝 - 多后台订单监控助手"
-APP_VERSION = "v1.0.0"
+APP_VERSION = "v1.0.1"
 
 
 def _normalize_config(data):
@@ -118,6 +118,14 @@ class App:
         self.icon = None
         self.order_notify_dialog = None
         
+        # 尝试设置窗口图标
+        try:
+            icon_path = os.path.join(os.path.dirname(CONFIG_FILE), 'logo.ico')
+            if os.path.exists(icon_path):
+                self.root.iconbitmap(icon_path)
+        except Exception:
+            pass
+
         self.create_widgets()
         self.root.protocol("WM_DELETE_WINDOW", self.on_window_closing)
         
@@ -286,9 +294,16 @@ class App:
 
     def start_tray_icon(self):
         # 创建图标图像
-        image = Image.new('RGB', (64, 64), color=(0, 120, 215))
-        d = ImageDraw.Draw(image)
-        d.text((10, 10), "租", fill=(255, 255, 255))
+        try:
+            icon_path = os.path.join(os.path.dirname(CONFIG_FILE), 'logo.ico')
+            if os.path.exists(icon_path):
+                image = Image.open(icon_path)
+            else:
+                raise FileNotFoundError
+        except Exception:
+            image = Image.new('RGB', (64, 64), color=(0, 120, 215))
+            d = ImageDraw.Draw(image)
+            d.text((10, 10), "租", fill=(255, 255, 255))
         
         # 定义菜单
         menu = (
