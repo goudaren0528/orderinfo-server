@@ -55,16 +55,29 @@ import sys
 logging.basicConfig(level=logging.DEBUG, stream=sys.stdout, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-logger.info(f"Checking database paths: {potential_db_paths}")
-logger.info(f"Selected Database URI: {default_db_uri}")
-if mapped_db_path:
-    logger.info(f"Found database file at: {mapped_db_path}")
-else:
-    logger.warning("No existing database file found in common locations. Using default (new/empty) 'auth.db'.")
-
 # 默认使用 SQLite
-app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', default_db_uri)
+final_db_uri = os.environ.get('DATABASE_URL', default_db_uri)
+app.config['SQLALCHEMY_DATABASE_URI'] = final_db_uri
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+logger.info(f"Checking database paths: {potential_db_paths}")
+# 隐藏敏感信息 (密码)
+safe_db_uri = final_db_uri
+if '@' in safe_db_uri:
+    try:
+        prefix, suffix = safe_db_uri.split('@', 1)
+        scheme_part = prefix.split('://', 1)[0]
+        safe_db_uri = f"{scheme_part}://****:****@{suffix}"
+    except:
+        pass
+logger.info(f"Selected Database URI: {safe_db_uri}")
+
+if mapped_db_path and 'sqlite' in final_db_uri:
+    logger.info(f"Found database file at: {mapped_db_path}")
+elif 'sqlite' in final_db_uri:
+    logger.warning("No existing database file found in common locations. Using default (new/empty) 'auth.db'.")
+elif 'postgresql' in final_db_uri:
+    logger.info("Using PostgreSQL database.")
 app.secret_key = os.environ.get('SECRET_KEY')
 ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD')
 ADMIN_API_KEY = os.environ.get('ADMIN_API_KEY')
@@ -1103,6 +1116,9 @@ def api_exception_handler(f):
 @app.route('/api/activate', methods=['POST'])
 @api_exception_handler
 def activate():
+    body = request.get_data()
+    app.logger.info(f"Activation request received. Body size: {len(body)}")
+
     client_ip = get_client_ip()
     if is_rate_limited(client_ip, 'activate', 60, 300):
         return _activation_error("请求过于频繁", 429)
