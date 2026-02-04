@@ -9,12 +9,35 @@ import uuid
 import base64
 import ctypes
 import hashlib
+import logging
 from ctypes import wintypes
 from urllib.parse import urlparse
 from datetime import datetime
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives import serialization
 from dotenv import load_dotenv
+
+# 配置日志
+def setup_client_logging():
+    log_filename = "client_debug.log"
+    if getattr(sys, 'frozen', False):
+        base_dir = os.path.dirname(sys.executable)
+    else:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+    
+    log_path = os.path.join(base_dir, log_filename)
+    
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler(log_path, encoding='utf-8', mode='a'),
+            logging.StreamHandler(sys.stdout)
+        ]
+    )
+    return logging.getLogger("AuthManager")
+
+logger = setup_client_logging()
 
 # 加载环境变量
 # 1. 尝试从 PyInstaller 临时目录加载 (打包进 EXE 的 .env)
@@ -206,7 +229,7 @@ class AuthManager:
                 with open(self.license_file, 'w', encoding='utf-8') as f:
                     json.dump(self.state, f)
         except Exception as e:
-            print(f"保存授权信息失败: {e}")
+            logger.error(f"保存授权信息失败: {e}")
 
     def _canonical_json(self, data):
         return json.dumps(data, separators=(',', ':'), sort_keys=True)
@@ -453,6 +476,7 @@ class AuthManager:
                 return True, "在线"
             return False, data.get("message", "心跳失败")
         except Exception as e:
+            logger.error(f"Heartbeat exception: {e}")
             state = self._load_state()
             last_ok = state.get('last_ok_ts')
             if last_ok and int(time.time()) - int(last_ok) <= self.grace_seconds:

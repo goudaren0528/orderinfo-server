@@ -25,18 +25,44 @@ load_dotenv(override=True)
 app = Flask(__name__)
 
 # 智能识别数据库路径
-# 优先使用项目根目录下的 instance/auth.db (如果存在)，以保持与旧环境数据一致
+# 1. 优先查找 Docker/部署环境可能挂载的 /app/instance/auth.db 或 /data/auth.db
+# 2. 查找项目根目录下的 instance/auth.db (开发环境常见)
+# 3. 默认使用当前目录下的 auth.db
+
 base_dir = os.path.dirname(os.path.abspath(__file__))
-root_instance_db = os.path.join(os.path.dirname(base_dir), 'instance', 'auth.db')
+potential_db_paths = [
+    os.path.join(base_dir, 'instance', 'auth.db'),           # /app/instance/auth.db
+    os.path.join(os.path.dirname(base_dir), 'instance', 'auth.db'), # ../instance/auth.db
+    os.path.join(base_dir, 'auth.db'),                       # /app/auth.db
+]
 
 default_db_uri = 'sqlite:///auth.db'
-if os.path.exists(root_instance_db):
-    # Windows 下绝对路径需要转义或正确处理
-    default_db_uri = f'sqlite:///{root_instance_db}'
-    print(f"Mapped database to root instance: {root_instance_db}")
+mapped_db_path = None
 
-# 默认使用 SQLite，如果需要使用 Postgres，只需修改环境变量或此处配置
-# 例如: 'postgresql://user:password@localhost/dbname'
+for path in potential_db_paths:
+    if os.path.exists(path):
+        # Windows 路径处理
+        if os.name == 'nt':
+            default_db_uri = f'sqlite:///{path}'
+        else:
+            default_db_uri = f'sqlite:///{path}'
+        mapped_db_path = path
+        break
+
+# 强制日志输出到标准输出 (Docker logs)
+import logging
+import sys
+logging.basicConfig(level=logging.DEBUG, stream=sys.stdout, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+logger.info(f"Checking database paths: {potential_db_paths}")
+logger.info(f"Selected Database URI: {default_db_uri}")
+if mapped_db_path:
+    logger.info(f"Found database file at: {mapped_db_path}")
+else:
+    logger.warning("No existing database file found in common locations. Using default (new/empty) 'auth.db'.")
+
+# 默认使用 SQLite
 app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', default_db_uri)
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.secret_key = os.environ.get('SECRET_KEY')
@@ -1268,12 +1294,21 @@ def generate_license_api():
 
 # 初始化数据库
 with app.app_context():
-    db.create_all()
-    ensure_device_unique_index()
-    ensure_device_public_key_column()
-    ensure_device_created_at_column()
-    ensure_license_remark_column()
-    ensure_license_revoked_column()
+    try:
+        db.create_all()
+        ensure_device_unique_index()
+        ensure_device_public_key_column()
+        ensure_device_created_at_column()
+        ensure_license_remark_column()
+        ensure_license_revoked_column()
+
+        # 检查是否有授权数据
+        license_count = License.query.count()
+        logger.info(f"Database initialized. Total licenses found: {license_count}")
+        if license_count == 0:
+            logger.warning("!!! WARNING: Database appears to be empty (0 licenses). Authorization will fail for everyone! !!!")
+    except Exception as e:
+        logger.error(f"Database initialization error: {e}")
 
 
 if __name__ == '__main__':
