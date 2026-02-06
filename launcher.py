@@ -26,7 +26,7 @@ else:
     CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')
 
 APP_TITLE = "租帮宝 - 多后台订单监控助手"
-APP_VERSION = "v1.0.1"
+APP_VERSION = "v1.0.2"
 
 
 def _normalize_config(data):
@@ -267,7 +267,8 @@ class App:
                     # 回填敏感字段
                     sensitive_keys = ["password", "login_password", "pay_password", "pwd", "secret", "passwd"]
                     for key in sensitive_keys:
-                        if key in local_site and (key not in site or not site[key]):
+                        # 只要本地有值，且不为空，就优先使用本地的 (防止服务器同步下来的空值或掩码覆盖本地密码)
+                        if key in local_site and local_site[key]:
                             site[key] = local_site[key]
                             
                     # 额外保护：如果用户说“配置消失”，可能是服务器返回了被篡改或空的非敏感字段

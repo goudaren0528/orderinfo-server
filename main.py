@@ -2506,6 +2506,12 @@ def run_scheduler():
 
     try:
         while True:
+            # 检查夜间模式 - 如果处于夜间模式，直接退出循环（结束程序）
+            if is_night_mode_active():
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] 到达夜间静默时段，停止监控服务。")
+                # 发送通知（可选）
+                break
+
             schedule.run_pending()
             
             # 随机心跳检测 (在等待期间保持活跃)
