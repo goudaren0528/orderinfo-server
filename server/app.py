@@ -1233,6 +1233,7 @@ def fetch_config():
 
 
 @app.route('/api/config/save', methods=['POST'])
+@api_exception_handler
 def save_config():
     client_ip = get_client_ip()
     if is_rate_limited(client_ip, 'config_save', 60, 300):

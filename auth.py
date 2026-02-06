@@ -572,7 +572,11 @@ class AuthManager:
             "nonce": uuid.uuid4().hex
         }
         response = self._post_signed("/api/config/save", payload)
-        data = response.json()
+        try:
+            data = response.json()
+        except json.decoder.JSONDecodeError:
+            text = response.text[:200] if response.text else ""
+            return False, f"服务器响应异常 (Status: {response.status_code}): {text}"
         if response.status_code == 200 and data.get("status") == "success":
             if data.get("config_token"):
                 self.state['config_token'] = data.get("config_token")
