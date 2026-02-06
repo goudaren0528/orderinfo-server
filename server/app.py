@@ -254,7 +254,13 @@ def format_pem(key_text):
     """修复环境变量中可能存在的 PEM 格式问题 (如将换行符转义为 \\n)"""
     if not key_text:
         return None
-    return key_text.replace('\\n', '\n').strip()
+    text = key_text.strip()
+    if (text.startswith('"') and text.endswith('"')) or (text.startswith("'") and text.endswith("'")):
+        text = text[1:-1].strip()
+    if (text.startswith("b'") and text.endswith("'")) or (text.startswith('b"') and text.endswith('"')):
+        text = text[2:-1].strip()
+    text = text.replace('\\r\\n', '\n').replace('\\n', '\n').replace('\r\n', '\n').strip()
+    return text
 
 
 def load_license_keys():
