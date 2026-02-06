@@ -48,6 +48,25 @@ if exist "README.md" (
     echo README.md copied.
 )
 
+echo Generating client-side .env...
+findstr /B "LICENSE_SERVER_URL WEB_SERVER_HOST_IP" .env > "%DIST_DIR%\.env"
+echo .env config generated for client (stripped sensitive secrets).
+
+if exist "%DIST_DIR%\_internal\.env" (
+    del "%DIST_DIR%\_internal\.env"
+    echo Removed sensitive .env from _internal directory.
+)
+
+if exist "%DIST_DIR%\backend" (
+    copy "%DIST_DIR%\.env" "%DIST_DIR%\backend\.env" >nul
+    echo Copied sanitized .env to backend.
+    
+    if exist "%DIST_DIR%\backend\_internal\.env" (
+        del "%DIST_DIR%\backend\_internal\.env"
+        echo Removed sensitive .env from backend\_internal directory.
+    )
+)
+
 if exist "playwright-browsers" (
     echo Copying browser environment...
     xcopy "playwright-browsers" "%DIST_DIR%\playwright-browsers" /E /I /Y /Q >nul

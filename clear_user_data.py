@@ -1,13 +1,12 @@
-
 import sys
 import os
 
 # Ensure the current directory is in the python path
 sys.path.append(os.getcwd())
 
-from server.app import app, db, LicenseConfig
 
 def clear_user_data(code):
+    from server.app import app, db, LicenseConfig
     with app.app_context():
         config = LicenseConfig.query.get(code)
         if config:
@@ -16,6 +15,7 @@ def clear_user_data(code):
             print(f"Successfully cleared user data for license code: {code}")
         else:
             print(f"No user data found for license code: {code}")
+
 
 if __name__ == "__main__":
     target_code = "b270fbab-caee-49e8-a0a8-6f4d01fcb978"

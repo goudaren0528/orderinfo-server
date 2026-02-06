@@ -362,7 +362,9 @@ def run_server():
     # threaded=True 允许并发请求（视频流会占用连接）
     host = os.environ.get('WEB_SERVER_HOST', '127.0.0.1')
     port = int(os.environ.get('WEB_SERVER_PORT', 5000))
-    print(f"远程控制访问令牌: {ACCESS_TOKEN}")
+    show_token = os.environ.get("WEB_SERVER_SHOW_TOKEN", "").lower() in ("1", "true", "yes")
+    if show_token:
+        print(f"远程控制访问令牌: {ACCESS_TOKEN}")
     app.run(host=host, port=port, debug=False, threaded=True, use_reloader=False)
 
 

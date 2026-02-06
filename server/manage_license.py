@@ -12,6 +12,7 @@ except Exception as e:
     print("Please run this script from the server directory or ensure dependencies are installed.")
     sys.exit(1)
 
+
 def list_licenses():
     print(f"DB URI: {app.config['SQLALCHEMY_DATABASE_URI']}")
     # print actual db file path if sqlite
@@ -19,9 +20,9 @@ def list_licenses():
         try:
             print(f"DB File: {db.engine.url.database}")
             print(f"Instance Path: {app.instance_path}")
-        except:
+        except Exception:
             pass
-            
+
     print("Loading licenses...")
     with app.app_context():
         try:
@@ -29,36 +30,42 @@ def list_licenses():
             if not licenses:
                 print("No licenses found in the database.")
                 return
-            
+
             print(f"\nFound {len(licenses)} licenses:")
             print("-" * 80)
             print(f"{'Code':<20} | {'Expire Date':<20} | {'Devices':<8} | {'Status':<10} | {'Remark'}")
             print("-" * 80)
-            
+
             for lic in licenses:
                 status = "Valid"
                 if lic.revoked:
                     status = "Revoked"
                 elif datetime.now() > lic.expire_date:
                     status = "Expired"
-                
-                print(f"{lic.code:<20} | {lic.expire_date.strftime('%Y-%m-%d %H:%M:%S'):<20} | {lic.max_devices:<8} | {status:<10} | {lic.remark or ''}")
+
+                line = (
+                    f"{lic.code:<20} | "
+                    f"{lic.expire_date.strftime('%Y-%m-%d %H:%M:%S'):<20} | "
+                    f"{lic.max_devices:<8} | {status:<10} | {lic.remark or ''}"
+                )
+                print(line)
             print("-" * 80)
         except Exception as e:
             print(f"Error accessing database: {e}")
+
 
 def add_license(code, days=365, max_devices=1, remark=""):
     with app.app_context():
         if License.query.get(code):
             print(f"Error: License code '{code}' already exists.")
             return
-        
+
         expire_date = datetime.now() + timedelta(days=days)
         lic = License(code=code, expire_date=expire_date, max_devices=max_devices, remark=remark)
         try:
             db.session.add(lic)
             db.session.commit()
-            print(f"\nSuccess! Added license:")
+            print("\nSuccess! Added license:")
             print(f"Code: {code}")
             print(f"Expire: {expire_date.strftime('%Y-%m-%d %H:%M:%S')}")
             print(f"Max Devices: {max_devices}")
@@ -67,13 +74,14 @@ def add_license(code, days=365, max_devices=1, remark=""):
             db.session.rollback()
             print(f"Error adding license: {e}")
 
+
 def delete_license(code):
     with app.app_context():
         lic = License.query.get(code)
         if not lic:
             print(f"Error: License code '{code}' not found.")
             return
-        
+
         try:
             db.session.delete(lic)
             db.session.commit()
@@ -82,6 +90,7 @@ def delete_license(code):
             db.session.rollback()
             print(f"Error deleting license: {e}")
 
+
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("\nUsage:")
@@ -89,9 +98,9 @@ if __name__ == "__main__":
         print("  python manage_license.py add <code> [days=365] [max_devices=1] [remark]")
         print("  python manage_license.py delete <code>")
         sys.exit(1)
-        
+
     command = sys.argv[1]
-    
+
     if command == "list":
         list_licenses()
     elif command == "add":

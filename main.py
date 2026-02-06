@@ -131,7 +131,12 @@ def load_config():
     if _config_cache is not None and time.time() - _config_cache_ts < 120:
         return _config_cache
     if not auth_manager.load_license():
-        _config_cache = _normalize_config({})
+        try:
+            with open(get_config_path(), 'r', encoding='utf-8') as f:
+                local_data = json.load(f)
+            _config_cache = _normalize_config(local_data)
+        except Exception:
+            _config_cache = _normalize_config({})
         _config_cache_ts = time.time()
         return _config_cache
     success, data = auth_manager.fetch_config()
@@ -139,7 +144,29 @@ def load_config():
         payload = data if isinstance(data, dict) else {}
         common_config = payload.get("common_config") or {}
         user_config = payload.get("user_config") or {}
+        local_config = _normalize_config({})
+        try:
+            with open(get_config_path(), 'r', encoding='utf-8') as f:
+                local_data = json.load(f)
+            local_config = _normalize_config(local_data)
+        except Exception:
+            local_config = _normalize_config({})
+
+        server_has_sites = len(user_config.get('sites', [])) > 0
+        local_has_sites = len(local_config.get('sites', [])) > 0
+        if not server_has_sites and local_has_sites:
+            user_config['sites'] = local_config.get('sites', [])
+
         merged = _merge_configs(common_config, user_config)
+        if local_config.get('sites'):
+            local_sites_map = {s.get('name'): s for s in local_config['sites'] if s.get('name')}
+            for site in merged.get('sites', []):
+                local_site = local_sites_map.get(site.get('name'))
+                if local_site:
+                    sensitive_keys = ["password", "login_password", "pay_password", "pwd", "secret", "passwd", "username", "account", "login_user", "login_username", "mobile", "phone"]
+                    for key in sensitive_keys:
+                        if key in local_site and local_site[key]:
+                            site[key] = local_site[key]
         try:
             _atomic_write_json(get_config_path(), merged)
         except Exception:

@@ -16,9 +16,12 @@ dist_prod/
 .idea/
 *.log
 auth.db
+instance/
 license.json
 playwright-browsers/
 *.zip
 .env
+.env.prod
+config.json
 browser_data/
 cookies/

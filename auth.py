@@ -17,6 +17,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives import serialization
 from dotenv import load_dotenv
 
+
 # 配置日志
 def setup_client_logging():
     log_filename = "client_debug.log"
@@ -24,9 +25,9 @@ def setup_client_logging():
         base_dir = os.path.dirname(sys.executable)
     else:
         base_dir = os.path.dirname(os.path.abspath(__file__))
-    
+
     log_path = os.path.join(base_dir, log_filename)
-    
+
     logging.basicConfig(
         level=logging.DEBUG,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -37,18 +38,35 @@ def setup_client_logging():
     )
     return logging.getLogger("AuthManager")
 
+
 logger = setup_client_logging()
 
 # 加载环境变量
 # 1. 尝试从 PyInstaller 临时目录加载 (打包进 EXE 的 .env)
 if getattr(sys, 'frozen', False):
+    # 优先加载 EXE 同级目录下的 .env (最高优先级)
+    exe_dir = os.path.dirname(sys.executable)
+    exe_env_path = os.path.join(exe_dir, '.env')
+    if os.path.exists(exe_env_path):
+        load_dotenv(exe_env_path, override=True)
+        logger.info(f"Loaded .env from EXE directory: {exe_env_path}")
+
+    # 其次尝试 _internal 目录 (PyInstaller onedir 默认资源目录)
+    internal_env_path = os.path.join(exe_dir, '_internal', '.env')
+    if os.path.exists(internal_env_path):
+        load_dotenv(internal_env_path, override=True)
+        logger.info(f"Loaded .env from _internal directory: {internal_env_path}")
+
+    # 最后尝试 sys._MEIPASS (onefile 模式)
     bundle_dir = getattr(sys, '_MEIPASS', '')
-    env_path = os.path.join(bundle_dir, '.env')
-    if os.path.exists(env_path):
-        load_dotenv(env_path)
+    if bundle_dir:
+        meipass_env_path = os.path.join(bundle_dir, '.env')
+        if os.path.exists(meipass_env_path):
+            load_dotenv(meipass_env_path)
+            logger.info(f"Loaded .env from MEIPASS: {meipass_env_path}")
 
 # 2. 尝试从当前工作目录加载 (开发环境 或 用户放置在 EXE 旁的 .env)
-# 注意：这会覆盖打包在 EXE 内部的 .env 配置
+# 注意：这会覆盖打包在 EXE 内部的 .env 配置 (如果上面没有 override=True 的话，但上面用了 override=True，这里主要用于开发环境)
 load_dotenv(override=True)
 
 # 默认服务器地址
@@ -57,7 +75,7 @@ logger.info(f"Loaded Configuration: SERVER_URL={DEFAULT_SERVER_URL}")
 if getattr(sys, 'frozen', False):
     logger.info(f"Running in Frozen mode. Executable: {sys.executable}")
     if 'localhost' in DEFAULT_SERVER_URL and 'speedstarsunblocked' not in DEFAULT_SERVER_URL:
-         logger.warning("WARNING: Using localhost in potentially Production environment?")
+        logger.warning("WARNING: Using localhost in potentially Production environment?")
 DPAPI_PURPOSE = b"zubaobao-license"
 
 
@@ -305,19 +323,19 @@ class AuthManager:
         state = self._load_state()
         stored_pem = state.get('server_public_key')
         env_pem = os.environ.get('LICENSE_PUBLIC_KEY')
-        
+
         # 即使有本地存储的公钥，也尝试从服务器更新，因为服务器可能重置了密钥
         # 但我们不会在每次调用时都请求，只在初始化或验证失败时
-        
+
         # 策略：如果 stored_pem 存在，先用它。但如果后续验证失败，会强制刷新。
         # 这里我们先尝试获取最新的，如果获取失败则回退到 stored_pem
-        
+
         pem = stored_pem or env_pem
-        
+
         # 强制尝试从服务器获取最新公钥（如果 URL 可达）
         try:
             url = f"{self.server_url}/api/public-key"
-            response = requests.get(url, timeout=5) # 短超时
+            response = requests.get(url, timeout=5)  # 短超时
             if response.status_code == 200:
                 data = response.json()
                 server_pem = data.get('public_key')
@@ -432,7 +450,7 @@ class AuthManager:
                 data = response.json()
             except json.decoder.JSONDecodeError:
                 return False, f"服务器响应异常 (Status: {response.status_code}): {response.text[:100]}"
-            
+
             if response.status_code == 200 and data.get("status") == "success":
                 license_payload = data.get('license')
                 license_signature = data.get('license_signature')
@@ -586,10 +604,10 @@ class AuthManager:
         try:
             if not self._is_secure_server_url():
                 return False, "授权服务器地址不安全，请使用 https"
-            
+
             # 过滤敏感信息
             safe_config = self._filter_sensitive_data(config)
-            
+
             token = self._ensure_config_token()
             if not token:
                 return False, "配置令牌获取失败"

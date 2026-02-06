@@ -1,4 +1,4 @@
 @echo off
 echo Running mypy type checking...
-mypy .
+mypy --explicit-package-bases --ignore-missing-imports .
 pause

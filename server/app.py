@@ -5,7 +5,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy import text
 from collections import defaultdict, deque
 from typing import Any, DefaultDict, Deque, Dict, Tuple
+import logging
 import os
+import sys
 import uuid
 import time
 import hmac
@@ -31,9 +33,9 @@ app = Flask(__name__)
 
 base_dir = os.path.dirname(os.path.abspath(__file__))
 potential_db_paths = [
-    os.path.join(base_dir, 'instance', 'auth.db'),           # /app/instance/auth.db
-    os.path.join(os.path.dirname(base_dir), 'instance', 'auth.db'), # ../instance/auth.db
-    os.path.join(base_dir, 'auth.db'),                       # /app/auth.db
+    os.path.join(base_dir, 'instance', 'auth.db'),  # /app/instance/auth.db
+    os.path.join(os.path.dirname(base_dir), 'instance', 'auth.db'),  # ../instance/auth.db
+    os.path.join(base_dir, 'auth.db'),  # /app/auth.db
 ]
 
 default_db_uri = 'sqlite:///auth.db'
@@ -49,9 +51,6 @@ for path in potential_db_paths:
         mapped_db_path = path
         break
 
-# 强制日志输出到标准输出 (Docker logs)
-import logging
-import sys
 logging.basicConfig(level=logging.DEBUG, stream=sys.stdout, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -68,7 +67,7 @@ if '@' in safe_db_uri:
         prefix, suffix = safe_db_uri.split('@', 1)
         scheme_part = prefix.split('://', 1)[0]
         safe_db_uri = f"{scheme_part}://****:****@{suffix}"
-    except:
+    except Exception:
         pass
 logger.info(f"Selected Database URI: {safe_db_uri}")
 
@@ -166,7 +165,6 @@ class ConfigToken(db.Model):
     token = db.Column(db.String(64), nullable=False)
     expire_ts = db.Column(db.Integer, nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.now)
-    
     __table_args__ = (db.Index('idx_config_token', 'license_code', 'machine_id'),)
 
 
@@ -263,7 +261,7 @@ def load_license_keys():
     global _license_private_key, _license_public_key
     if _license_private_key and _license_public_key:
         return _license_private_key, _license_public_key
-    
+
     if LICENSE_PRIVATE_KEY and LICENSE_PUBLIC_KEY:
         try:
             private_pem = format_pem(LICENSE_PRIVATE_KEY)
@@ -274,7 +272,7 @@ def load_license_keys():
         except Exception as e:
             app.logger.error(f"Failed to load keys from environment variables: {e}")
             # 如果环境变量中的 key 无效，尝试从数据库加载或生成新的（视情况而定，这里继续往下走）
-            
+
     store_private = KeyStore.query.get('license_private_key')
     store_public = KeyStore.query.get('license_public_key')
     if store_private and store_public:
@@ -571,7 +569,7 @@ def _audit_request(endpoint, code, machine_id, ok, reason):
 def _issue_config_token(code, machine_id):
     token = secrets.token_urlsafe(32)
     expire_ts = int(time.time()) + 600
-    
+
     # 查找现有 Token 或创建新的
     record = ConfigToken.query.filter_by(license_code=code, machine_id=machine_id).first()
     if record:
@@ -586,7 +584,7 @@ def _issue_config_token(code, machine_id):
             expire_ts=expire_ts
         )
         db.session.add(record)
-    
+
     db.session.commit()
     return token, expire_ts
 
@@ -595,12 +593,12 @@ def _verify_config_token(code, machine_id, token):
     record = ConfigToken.query.filter_by(license_code=code, machine_id=machine_id).first()
     if not record:
         return False
-        
+
     if int(time.time()) > record.expire_ts:
         db.session.delete(record)
         db.session.commit()
         return False
-        
+
     return secrets.compare_digest(record.token, token or "")
 
 
@@ -830,6 +828,7 @@ def _load_help_content():
         return ""
     return store.value
 
+
 @app.route('/dashboard')
 @login_required
 def dashboard():
@@ -847,7 +846,7 @@ def dashboard():
     # 加载通用配置 (用于前端显示)
     common_config = _load_common_config()
     common_config_json = json.dumps(common_config, indent=2, ensure_ascii=False)
-    
+
     # 加载使用说明
     help_content = _load_help_content()
 
@@ -871,18 +870,18 @@ def update_common_config():
     if not validate_csrf_token():
         flash('请求无效，请刷新页面重试', 'danger')
         return redirect(url_for('dashboard'))
-    
+
     config_json = request.form.get('common_config')
     if not config_json:
         flash('配置内容不能为空', 'danger')
         return redirect(url_for('dashboard'))
-        
+
     try:
         config_data = json.loads(config_json)
         if not isinstance(config_data, dict):
-             flash('配置必须是 JSON 对象', 'danger')
-             return redirect(url_for('dashboard'))
-        
+            flash('配置必须是 JSON 对象', 'danger')
+            return redirect(url_for('dashboard'))
+
         # 保存到 KeyStore
         payload = json.dumps(config_data, ensure_ascii=False)
         store = KeyStore.query.get('common_config')
@@ -898,9 +897,8 @@ def update_common_config():
     except Exception as e:
         db.session.rollback()
         flash(f'更新失败: {str(e)}', 'danger')
-        
-    return redirect(url_for('dashboard'))
 
+    return redirect(url_for('dashboard'))
 
 
 @app.route('/dashboard/config/help', methods=['POST'])
@@ -909,12 +907,12 @@ def update_help_content():
     if not validate_csrf_token():
         flash('请求无效，请刷新页面重试', 'danger')
         return redirect(url_for('dashboard'))
-    
+
     content = request.form.get('help_content')
     if not content:
         flash('说明内容不能为空', 'danger')
         return redirect(url_for('dashboard'))
-        
+
     try:
         # 保存到 KeyStore
         store = KeyStore.query.get('help_content')
@@ -928,7 +926,7 @@ def update_help_content():
     except Exception as e:
         db.session.rollback()
         flash(f'更新失败: {str(e)}', 'danger')
-        
+
     return redirect(url_for('dashboard'))
 
 
@@ -1078,11 +1076,11 @@ def get_license_devices(code):
     license_obj = License.query.get(code)
     if not license_obj:
         return jsonify({'error': '授权码不存在'}), 404
-    
+
     devices = Device.query.filter_by(license_code=code).all()
     device_list = []
     threshold = datetime.now() - timedelta(minutes=10)
-    
+
     for d in devices:
         is_online = d.last_heartbeat >= threshold
         device_list.append({
@@ -1092,7 +1090,7 @@ def get_license_devices(code):
             'created_at': d.created_at.strftime('%Y-%m-%d %H:%M:%S') if d.created_at else '未知',
             'is_online': is_online
         })
-    
+
     return jsonify(device_list)
 
 
