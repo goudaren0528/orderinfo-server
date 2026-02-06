@@ -48,10 +48,16 @@ if getattr(sys, 'frozen', False):
         load_dotenv(env_path)
 
 # 2. 尝试从当前工作目录加载 (开发环境 或 用户放置在 EXE 旁的 .env)
-load_dotenv(override=True)  # override=True 表示如果有同名变量，优先使用这里加载的
+# 注意：这会覆盖打包在 EXE 内部的 .env 配置
+load_dotenv(override=True)
 
 # 默认服务器地址
 DEFAULT_SERVER_URL = os.environ.get("LICENSE_SERVER_URL", "http://localhost:5005")
+logger.info(f"Loaded Configuration: SERVER_URL={DEFAULT_SERVER_URL}")
+if getattr(sys, 'frozen', False):
+    logger.info(f"Running in Frozen mode. Executable: {sys.executable}")
+    if 'localhost' in DEFAULT_SERVER_URL and 'speedstarsunblocked' not in DEFAULT_SERVER_URL:
+         logger.warning("WARNING: Using localhost in potentially Production environment?")
 DPAPI_PURPOSE = b"zubaobao-license"
 
 
