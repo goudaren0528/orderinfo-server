@@ -11,6 +11,7 @@ dist/
 dist_new/
 dist_dev/
 dist_prod/
+dist_prod_new/
 *.spec
 .vscode/
 .idea/

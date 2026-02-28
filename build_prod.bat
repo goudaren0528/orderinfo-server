@@ -22,7 +22,7 @@ echo.
 REM timeout /t 5
 
 echo [1/4] Cleaning old files...
-set "BUILD_OUTPUT=dist_prod"
+set "BUILD_OUTPUT=dist_prod_new"
 if exist build rmdir /s /q build
 if exist "%BUILD_OUTPUT%" rmdir /s /q "%BUILD_OUTPUT%"
 

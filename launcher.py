@@ -658,8 +658,22 @@ class App:
         self.refresh_webhook_lists()
 
     def init_log_tab(self, parent):
+        # 顶部控制栏
+        ctrl_frame = ttk.Frame(parent)
+        ctrl_frame.pack(fill=tk.X, pady=(0, 5))
+        
+        self.show_debug_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(ctrl_frame, text="显示详细调试日志", variable=self.show_debug_var).pack(side=tk.LEFT)
+        
+        ttk.Button(ctrl_frame, text="清空日志", command=self.clear_log).pack(side=tk.RIGHT)
+
         self.log_text = scrolledtext.ScrolledText(parent, state='disabled', font=('Consolas', 9))
         self.log_text.pack(fill=tk.BOTH, expand=True)
+
+    def clear_log(self):
+        self.log_text.configure(state='normal')
+        self.log_text.delete('1.0', tk.END)
+        self.log_text.configure(state='disabled')
 
     def init_help_tab(self, parent):
         self.help_text_widget = scrolledtext.ScrolledText(parent, font=('微软雅黑', 10), padx=20, pady=20)
@@ -858,6 +872,12 @@ class App:
             entry.grid(row=row, column=1, padx=10, pady=5)
             if site_data: entry.insert(0, site_data.get(key, ""))
             entries[key] = entry
+            
+            # 针对密码字段增加提示
+            # if key == "password":
+            #     hint_lbl = ttk.Label(edit_win, text="(手机验证登录站点可不填)", font=("微软雅黑", 8), foreground="gray")
+            #     hint_lbl.grid(row=row, column=2, padx=0, pady=5, sticky='w')
+            
             row += 1
 
         # 订单页地址
@@ -1019,10 +1039,25 @@ class App:
             # 切换为常驻弹窗提醒 (在主线程执行)
             self.root.after(0, lambda: self.show_manual_intervention_dialog(site_name))
         
-        self.log_text.configure(state='normal')
-        self.log_text.insert(tk.END, message)
-        self.log_text.see(tk.END)
-        self.log_text.configure(state='disabled')
+        # === 增强功能：日志过滤与时间戳 ===
+        # 1. 添加时间戳
+        timestamp = datetime.now().strftime("[%Y-%m-%d %H:%M:%S] ")
+        
+        # 2. 根据勾选框过滤日志
+        show_log = True
+        # 注意：show_debug_var 可能在初始化阶段尚未创建，要做防守
+        if hasattr(self, 'show_debug_var') and not self.show_debug_var.get():
+            # 未勾选详细日志时，只显示关键信息
+            # 关键信息关键词：抓取完成 (数量), 通知 (发送情况), 等待人工 (重要交互), 错误 (异常)
+            keywords = ["抓取完成", "通知", "指令发送", "等待人工", "错误", "Error", "启动", "停止", "系统"]
+            if not any(k in message for k in keywords):
+                show_log = False
+        
+        if show_log:
+            self.log_text.configure(state='normal')
+            self.log_text.insert(tk.END, f"{timestamp}{message}")
+            self.log_text.see(tk.END)
+            self.log_text.configure(state='disabled')
 
     def update_monitor_data(self, pkg):
         # 清空旧数据
@@ -1062,7 +1097,10 @@ class App:
             notify_msg = "检测到有待处理订单：\n" + "\n".join(notify_items) if notify_items else "检测到有待处理订单，请及时查看！"
             
             self.notify("租帮宝 - 新订单提醒", notify_msg)
-            self.show_order_notification(results, timestamp)
+            
+            # 只有在开启桌面气泡通知时才显示右下角弹窗
+            if self.config.get('desktop_notify', True):
+                self.show_order_notification(results, timestamp)
 
     def show_order_notification(self, results, timestamp):
         items = []
@@ -1197,6 +1235,13 @@ class App:
             # 如果站点未启用监控，跳过检查
             if not site.get('enabled', True):
                 continue
+            
+            # 特殊处理：零零享允许没有密码 (模糊匹配名称)
+            if '零零享' in site.get('name', ''):
+                if not site.get('username'):
+                    missing_creds.append(f"{site.get('name')} (缺少用户名)")
+                continue
+
             if not site.get('username') or not site.get('password'):
                 missing_creds.append(site.get('name', '未知站点'))
 
@@ -1446,7 +1491,8 @@ class App:
         def _req():
             try:
                 url = f"http://localhost:5000/api/browser/{action}"
-                resp = requests.post(url, timeout=3)
+                headers = {"X-Access-Token": os.environ.get("WEB_SERVER_TOKEN", "")}
+                resp = requests.post(url, timeout=3, headers=headers)
                 if resp.status_code == 200:
                     self.root.after(0, lambda: self.log(f"指令发送成功: {action}\n"))
                 else:

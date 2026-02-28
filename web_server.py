@@ -16,6 +16,22 @@ def _is_authorized():
     return _get_request_token() == ACCESS_TOKEN
 
 
+def _handle_browser_action(action):
+    if action not in ["show", "hide"]:
+        return jsonify({"error": "Invalid action"}), 400
+
+    shared.window_control_queue.put(action)
+    return jsonify({"status": "ok", "action": action, "handled": False})
+
+
+@app.route('/api/browser/<action>', methods=['POST'])
+def browser_control(action):
+    if not _is_authorized():
+        if request.remote_addr not in ("127.0.0.1", "::1"):
+            return jsonify({"error": "Unauthorized"}), 401
+    return _handle_browser_action(action)
+
+
 # 远程控制页面模板
 REMOTE_CONTROL_HTML = """
 <!DOCTYPE html>
@@ -335,21 +351,17 @@ def handle_action():
 @app.route('/api/browser/show', methods=['POST'])
 def browser_show():
     if not _is_authorized():
-        return jsonify({"status": "error", "message": "Unauthorized"}), 401
-    if shared.browser_manager:
-        shared.browser_manager.move_browser_onscreen()
-        return jsonify({"status": "ok", "message": "Browser moved onscreen"})
-    return jsonify({"status": "error", "message": "Browser manager not initialized"}), 503
+        if request.remote_addr not in ("127.0.0.1", "::1"):
+            return jsonify({"status": "error", "message": "Unauthorized"}), 401
+    return _handle_browser_action("show")
 
 
 @app.route('/api/browser/hide', methods=['POST'])
 def browser_hide():
     if not _is_authorized():
-        return jsonify({"status": "error", "message": "Unauthorized"}), 401
-    if shared.browser_manager:
-        shared.browser_manager.move_browser_offscreen()
-        return jsonify({"status": "ok", "message": "Browser moved offscreen"})
-    return jsonify({"status": "error", "message": "Browser manager not initialized"}), 503
+        if request.remote_addr not in ("127.0.0.1", "::1"):
+            return jsonify({"status": "error", "message": "Unauthorized"}), 401
+    return _handle_browser_action("hide")
 
 
 @app.route('/')

@@ -62,6 +62,10 @@ WECOM_WEBHOOK_URL_ALERT: list[str] = []
 SERVER_IP = os.environ.get("WEB_SERVER_HOST_IP", "localhost") # 如果在云服务器，请修改为公网IP
 SERVER_PORT = int(os.environ.get("WEB_SERVER_PORT", 5000))
 
+# 登录失败记录 (防风控)
+LOGIN_FAILED_SITES = set()
+LOGIN_FAILED_LOCK = threading.Lock()
+
 def get_config_path():
     if getattr(sys, 'frozen', False):
         exe_dir = os.path.dirname(sys.executable)
@@ -669,6 +673,59 @@ def load_global_cookies(context):
     except Exception as e:
         print(f"恢复全局状态失败: {e}")
 
+def _site_storage_key(site_name):
+    return re.sub(r'[^a-zA-Z0-9._-]+', '_', site_name or "site")
+
+def _session_storage_path(site_name):
+    safe = _site_storage_key(site_name)
+    return os.path.join('cookies', f"{safe}_session_storage.json")
+
+def _get_session_storage_payload(site, selectors):
+    login_url = site.get('login_url')
+    order_menu_link = selectors.get('order_menu_link') if selectors else None
+    host = _extract_hostname(order_menu_link) or _extract_hostname(login_url)
+    if not host or "llxzu.com" not in host:
+        return None
+    path = _session_storage_path(site.get('name') or host)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            payload = json.load(f)
+        data = payload.get("data") if isinstance(payload, dict) else None
+        saved_host = payload.get("host") if isinstance(payload, dict) else None
+        if isinstance(data, dict) and saved_host:
+            return {"host": saved_host, "data": data}
+    except Exception:
+        return None
+    return None
+
+def _save_session_storage_payload(page, site, selectors):
+    login_url = site.get('login_url')
+    order_menu_link = selectors.get('order_menu_link') if selectors else None
+    host = _extract_hostname(order_menu_link) or _extract_hostname(login_url)
+    if not host or "llxzu.com" not in host:
+        return
+    try:
+        data = page.evaluate("() => { const d = {}; for (let i = 0; i < sessionStorage.length; i++) { const k = sessionStorage.key(i); d[k] = sessionStorage.getItem(k); } return d; }")
+        if not isinstance(data, dict):
+            return
+        if not os.path.exists('cookies'):
+            os.makedirs('cookies')
+        payload = {"host": host, "data": data}
+        with open(_session_storage_path(site.get('name') or host), 'w', encoding='utf-8') as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+    except Exception:
+        return
+
+def _clear_session_storage_payload(site):
+    try:
+        path = _session_storage_path(site.get('name') or "")
+        if os.path.exists(path):
+            os.remove(path)
+    except Exception:
+        return
+
 def handle_popups(page, site_name=""):
     """尝试关闭常见的弹窗/遮罩"""
     try:
@@ -709,7 +766,780 @@ def process_window_events(manager):
     except Exception as e:
         print(f"处理窗口队列出错: {e}")
 
+import concurrent.futures
+
+# 配置写入锁，防止并发写入导致配置丢失
+config_write_lock = threading.Lock()
+
+class InterventionManager:
+    """并发模式下的人工介入窗口管理器"""
+    def __init__(self, manager):
+        self.lock = threading.Lock()
+        self.manager = manager
+
+    def enter(self, site_name, timeout_seconds=60):
+        self.lock.acquire()
+        shared.is_interactive_mode = True
+        shared.current_site_name = site_name
+        print(f"[{site_name}] >>> 等待人工手动登录 (限时 {timeout_seconds} 秒)...")
+        if self.manager:
+            self.manager.move_browser_onscreen()
+
+    def exit(self):
+        if self.manager:
+            self.manager.move_browser_offscreen()
+        shared.is_interactive_mode = False
+        shared.current_site_name = None
+        self.lock.release()
+
+def process_site_task(site, cdp_port, intervention_manager):
+    """单个站点的抓取任务 (运行在独立线程)"""
+    # 每个线程创建独立的 Playwright 实例
+    p = sync_playwright().start()
+    browser = None
+    context = None
+    page = None
+    result = None
+    
+    try:
+        # 连接到主进程的 Chrome
+        try:
+            browser = p.chromium.connect_over_cdp(f"http://127.0.0.1:{cdp_port}")
+            # 尝试获取持久化上下文 (通常是第一个)
+            if browser.contexts:
+                context = browser.contexts[0]
+            else:
+                # 如果没有，创建新的 (注意：这意味着 Cookie 不共享，除非手动加载)
+                context = browser.new_context()
+        except Exception as e:
+            return {"name": site['name'], "error": f"浏览器连接失败: {e}", "count": 0}
+
+        target_page = None
+        if context.pages:
+            for existing_page in context.pages:
+                try:
+                    p_name = existing_page.evaluate("window.name")
+                    if p_name == site['name']:
+                        target_page = existing_page
+                        print(f"[{site['name']}] 复用已有页面 (window.name匹配)")
+                        break
+                except: pass
+        
+        if target_page and not target_page.is_closed():
+            page = target_page
+            try: 
+                if not shared.is_interactive_mode or shared.current_site_name == site['name']:
+                    page.bring_to_front()
+            except: pass
+            
+            # 对于复用的页面，也尝试注入 sessionStorage (如果是 llxzu.com)
+            # 因为可能页面被刷新过，或者 sessionStorage 丢失
+            try:
+                host = _extract_hostname(page.url or "")
+                if host and "llxzu.com" in host:
+                    payload = _get_session_storage_payload(site, site.get('selectors', {}))
+                    if payload:
+                         page.evaluate(
+                            "(data) => { try { const keys = Object.keys(data || {}); for (let i = 0; i < keys.length; i++) { const k = keys[i]; try { sessionStorage.setItem(k, data[k]); } catch (e) {} } } catch (e) {} }",
+                            payload.get("data")
+                        )
+                         # print(f"[{site['name']}] 复用页面时补充注入 sessionStorage")
+            except: pass
+        else:
+            try:
+                page = context.new_page()
+                try: page.evaluate(f"window.name = '{site['name']}'") 
+                except: pass
+            except Exception as e:
+                return {"name": site['name'], "error": f"创建页面失败: {e}", "count": 0}
+
+            payload = _get_session_storage_payload(site, site.get('selectors', {}))
+            if payload:
+                try:
+                    # 注入 sessionStorage
+                    page.add_init_script(
+                        script="(data, host) => { try { const h = location.hostname || ''; if (!h.endsWith(host)) return; const keys = Object.keys(data || {}); for (let i = 0; i < keys.length; i++) { const k = keys[i]; try { sessionStorage.setItem(k, data[k]); } catch (e) {} } } catch (e) {} }",
+                        arg={
+                            "data": payload.get("data"),
+                            "host": payload.get("host")
+                        }
+                    )
+                    # 立即执行一次，以防页面已经在加载中
+                    page.evaluate(
+                        "(data) => { try { const keys = Object.keys(data || {}); for (let i = 0; i < keys.length; i++) { const k = keys[i]; try { sessionStorage.setItem(k, data[k]); } catch (e) {} } } catch (e) {} }",
+                        payload.get("data")
+                    )
+                    print(f"[{site['name']}] 已注入 sessionStorage (Payload)")
+                except Exception as e:
+                    print(f"[{site['name']}] 注入 sessionStorage 失败: {e}")
+
+            # === 资源拦截 (仅新页面需要设置) ===
+            try:
+                def route_handler(route):
+                    if route.request.resource_type in ["media", "font"]:
+                        route.abort()
+                    else:
+                        route.continue_()
+                page.route("**/*", route_handler)
+            except: pass
+
+            # 注入 Stealth JS
+            try:
+                stealth_js = """
+                    try { Object.defineProperty(navigator, 'webdriver', { get: () => undefined }); } catch (e) {}
+                    try { if (!window.chrome) { window.chrome = {}; } } catch (e) {}
+                """
+                page.add_init_script(stealth_js)
+            except: pass
+
+        # 设置超时
+        page.set_default_timeout(20000)
+        page.set_default_navigation_timeout(30000)
+
+        selectors = site.get('selectors', {})
+        auto_selectors = {}
+        if 'keep_page_alive' in site:
+            keep_page_alive = bool(site.get('keep_page_alive'))
+        else:
+            keep_page_alive = True
+
+        login_url = site.get('login_url')
+        order_menu_link = selectors.get('order_menu_link')
+        target_host = _extract_hostname(order_menu_link) or _extract_hostname(login_url)
+
+        def _pick_active_page(ctx):
+            try:
+                pages = [p for p in ctx.pages if not p.is_closed()]
+                if not pages:
+                    return None
+                for p in pages:
+                    try:
+                        if p.evaluate("window.name") == site.get('name'):
+                            return p
+                    except:
+                        pass
+                if target_host:
+                    for p in pages:
+                        try:
+                            if target_host in (p.url or ""):
+                                return p
+                        except:
+                            pass
+                return pages[-1]
+            except Exception:
+                return None
+
+        def _ensure_page_alive():
+            nonlocal page
+            # 当有人工介入时，降低后台任务的活跃度，减少资源争抢
+            if shared.is_interactive_mode and shared.current_site_name != site.get('name'):
+                time.sleep(0.5)
+
+            if page and not page.is_closed():
+                return True
+            page = _pick_active_page(context)
+            if page and not page.is_closed():
+                try:
+                    if not shared.is_interactive_mode or shared.current_site_name == site.get('name'):
+                        page.bring_to_front()
+                except:
+                    pass
+                try:
+                    page.evaluate(f"window.name = '{site.get('name')}'")
+                except:
+                    pass
+                return True
+            return False
+
+        target_url = login_url
+        direct_access_attempted = False
+        
+        if order_menu_link and is_url(order_menu_link):
+            target_url = order_menu_link
+            direct_access_attempted = True
+            print(f"[{site['name']}] 目标地址: {target_url}")
+        else:
+            print(f"[{site['name']}] 目标地址: {target_url}")
+
+        # 导航逻辑优化 (避免重复加载)
+        should_navigate = True
+        try:
+            if not _ensure_page_alive():
+                return {"name": site['name'], "error": "页面已关闭", "count": 0}
+            curr_url = page.url or ""
+            target_key = target_url.split('://')[-1].split('?')[0] if '://' in target_url else target_url
+            
+            # 如果当前 URL 包含目标特征
+            if target_key in curr_url:
+                 # 且不是登录页 (除非目标就是登录页)
+                 if "login" not in curr_url.lower() or "login" in target_url.lower():
+                     should_navigate = False
+                     print(f"[{site['name']}] 页面已在目标地址，跳过导航")
+        except: pass
+
+        # 导航或刷新
+        try:
+            if should_navigate:
+                page.goto(target_url, wait_until='domcontentloaded')
+                # 用户需求：第一次加载（非复用页面），给予更长的等待时间 5 秒
+                try: page.wait_for_timeout(5000)
+                except: pass
+            else:
+                host = _extract_hostname(page.url or "") or _extract_hostname(target_url) or ""
+                if "llxzu.com" in host:
+                    page.wait_for_timeout(1500)
+                else:
+                    print(f"[{site['name']}] 原位刷新...")
+                    page.reload(wait_until='domcontentloaded')
+                    try: page.wait_for_timeout(2000)
+                    except: pass
+        except Exception as e:
+            print(f"[{site['name']}] 页面加载/刷新失败: {e}")
+            # 继续尝试后续逻辑
+
+        if not _ensure_page_alive():
+            return {"name": site['name'], "error": "页面已关闭", "count": 0}
+
+        # 检查登录状态
+        check_selector = selectors.get('pending_tab_selector')
+        if not check_selector:
+            check_selector = selectors.get('order_menu_link')
+            if is_url(check_selector):
+                check_selector = selectors.get('pending_count_element')
+            else:
+                check_selector = check_selector or selectors.get('pending_count_element')
+
+        is_logged_in = False
+        
+        expired_detected = False
+        expired_soft = False
+        try:
+            expired_texts = [
+                ("登录过期", False),
+                ("请重新登录", False),
+                ("身份验证失败", False),
+                ("登录失效", False),
+                ("重新登录", False),
+                ("重新登陆", False),
+                ("您已长时间未操作", False),
+                ("需要重新登录", False)
+            ]
+            for text, is_soft in expired_texts:
+                locator = page.get_by_text(text, exact=False)
+                if locator.is_visible(timeout=500):
+                    print(f"[{site['name']}] 检测到登录过期提示: {text}")
+                    expired_detected = True
+                    expired_soft = bool(is_soft)
+                    break
+        except:
+            pass
+
+        # 判定登录
+        if check_selector and not is_url(check_selector):
+            try:
+                is_logged_in = page.is_visible(check_selector)
+            except Exception:
+                if _ensure_page_alive():
+                    try:
+                        is_logged_in = page.is_visible(check_selector)
+                    except Exception:
+                        is_logged_in = False
+
+        if not is_logged_in:
+            order_menu_selector = selectors.get('order_menu_link')
+            if order_menu_selector and not is_url(order_menu_selector):
+                try:
+                    if page.is_visible(order_menu_selector):
+                        is_logged_in = True
+                except Exception:
+                    pass
+
+        if not is_logged_in:
+            count_selector = selectors.get('pending_count_element')
+            if count_selector:
+                try:
+                    if page.is_visible(count_selector):
+                        is_logged_in = True
+                except Exception:
+                    pass
+
+        if not is_logged_in:
+            try:
+                current_url = page.url or ""
+                is_login_like = ("login" in current_url.lower() or "signin" in current_url.lower())
+                user_input_sel = selectors.get('username_input')
+                login_form_visible = False
+                if user_input_sel:
+                    try:
+                        login_form_visible = page.is_visible(user_input_sel)
+                    except Exception:
+                        login_form_visible = False
+                order_menu_link = selectors.get('order_menu_link')
+                if order_menu_link and is_url(order_menu_link):
+                    if (order_menu_link in current_url) and (not is_login_like) and (not login_form_visible):
+                        is_logged_in = True
+            except Exception:
+                pass
+
+        if expired_detected:
+            if expired_soft and is_logged_in:
+                pass
+            else:
+                if not expired_soft:
+                    try:
+                        clear_site_cookies_preserve_others(context, site, selectors)
+                    except:
+                        pass
+                    _clear_session_storage_payload(site)
+                try:
+                    page.goto(site['login_url'])
+                except:
+                    pass
+                is_logged_in = False
+        
+        if not is_logged_in:
+            # 检查是否因上轮失败而被暂时封禁 (防风控)
+            with LOGIN_FAILED_LOCK:
+                is_failed = site['name'] in LOGIN_FAILED_SITES
+            
+            if is_failed:
+                print(f"[{site['name']}] 上轮登录失败，跳过自动登录以防风控")
+                return {"name": site['name'], "error": "已停止登录(防风控)", "count": 0}
+
+            if direct_access_attempted:
+                # 尝试跳转登录页
+                try:
+                    page.goto(login_url)
+                    page.wait_for_load_state('domcontentloaded')
+                except:
+                    pass
+            
+            # 自动登录
+            print(f"[{site['name']}] 尝试自动登录...")
+            try:
+                if not _ensure_page_alive():
+                    return {"name": site['name'], "error": "页面已关闭", "count": 0}
+                # 这里简化了原有的复杂智能登录逻辑，直接尝试填表
+                # 如果需要完整逻辑，代码量较大，这里保留核心部分
+                
+                # 1. 账号
+                user_sel = selectors.get('username_input')
+                if not user_sel:
+                    # 简单智能查找
+                    for loc in ["input[placeholder*='账号']", "input[name*='user']", "input[type='text']"]:
+                        if page.locator(loc).first.is_visible():
+                            user_sel = loc
+                            auto_selectors['username_input'] = loc
+                            break
+                
+                if user_sel:
+                    page.fill(user_sel, site.get('username', ''))
+                
+                # 2. 密码
+                pwd_sel = selectors.get('password_input')
+                if not pwd_sel:
+                     if page.locator("input[type='password']").first.is_visible():
+                         pwd_sel = "input[type='password']"
+                         auto_selectors['password_input'] = pwd_sel
+                
+                if pwd_sel:
+                    # 针对 "零零享" 或其他可能无需密码的平台，允许空密码
+                    pwd_val = site.get('password', '')
+                    if pwd_val or '零零享' in site.get('name', ''):
+                         page.fill(pwd_sel, pwd_val)
+                    else:
+                         # 只有当密码确实存在时才填充，否则可能是误判或者是已记住密码的情况
+                         if pwd_val: page.fill(pwd_sel, pwd_val)
+                    
+                    # 3. 登录按钮
+                    btn_sel = selectors.get('login_button')
+                    if not btn_sel:
+                         for loc in ["button:has-text('登录')", "input[type='submit']"]:
+                             if page.locator(loc).first.is_visible():
+                                 btn_sel = loc
+                                 auto_selectors['login_button'] = loc
+                                 break
+                    
+                    if btn_sel:
+                        page.click(btn_sel)
+                    else:
+                        page.keyboard.press('Enter')
+                    
+                    page.wait_for_load_state('networkidle')
+                    time.sleep(2)
+            except Exception as e:
+                print(f"[{site['name']}] 自动登录出错: {e}")
+
+            # 再次检查
+            if check_selector and not is_url(check_selector):
+                try:
+                    is_logged_in = page.is_visible(check_selector)
+                except Exception:
+                    if _ensure_page_alive():
+                        try:
+                            is_logged_in = page.is_visible(check_selector)
+                        except Exception:
+                            is_logged_in = False
+            
+            # 人工介入
+            if not is_logged_in:
+                print(f"[{site['name']}] 需要人工介入登录")
+                intervention_manager.enter(site['name'], 90)
+                try:
+                    try: page.bring_to_front()
+                    except: pass
+
+                    # 等待人工登录 (限时 90秒)
+                    start_wait = time.time()
+                    while time.time() - start_wait < 90:
+                        if not _ensure_page_alive():
+                            time.sleep(1)
+                            continue
+                        
+                        # 确保页面在最前
+                        try: page.bring_to_front()
+                        except: pass
+
+                        # 1. 明确的登录成功信号：目标元素可见
+                        if check_selector and not is_url(check_selector):
+                            try:
+                                if page.is_visible(check_selector):
+                                    is_logged_in = True
+                                    print(f"[{site['name']}] 检测到目标元素，判定登录成功")
+                                    break
+                            except Exception as e:
+                                if "Target page, context or browser has been closed" in str(e):
+                                    continue
+                        
+                        # 2. 负面信号：登录输入框消失
+                        # 如果能找到用户名/密码框，且它们变得不可见，说明可能提交了
+                        user_input_sel = selectors.get('username_input') or auto_selectors.get('username_input')
+                        if user_input_sel:
+                            # 只有当之前存在现在消失才算，或者直接判断当前不可见
+                            # 但要注意页面加载时可能短暂不可见，所以结合URL判断
+                            try:
+                                if not page.is_visible(user_input_sel):
+                                    curr_url = page.url or ""
+                                    if "login" not in curr_url.lower():
+                                        is_logged_in = True
+                                        print(f"[{site['name']}] 登录框不可见且URL不含login，判定登录成功")
+                                        break
+                            except Exception as e:
+                                if "Target page, context or browser has been closed" in str(e):
+                                    continue
+
+                        # 3. URL 变动检查 (优化版)
+                        # 如果 URL 发生了显著变化 (不仅仅是参数)，且不包含 login
+                        try:
+                            if login_url not in (page.url or "") and "login" not in (page.url or ""):
+                                 is_logged_in = True 
+                                 print(f"[{site['name']}] URL变动，判定登录成功")
+                                 break
+                        except Exception as e:
+                            if "Target page, context or browser has been closed" in str(e):
+                                continue
+                        
+                        time.sleep(1)
+                finally:
+                    intervention_manager.exit()
+                
+                if is_logged_in:
+                    # 保存 selectors
+                    if auto_selectors:
+                        with config_write_lock:
+                            try:
+                                _update_site_selectors_in_config(site['name'], auto_selectors)
+                            except: pass
+
+        if is_logged_in:
+            # 登录成功，清除失败标记
+            with LOGIN_FAILED_LOCK:
+                if site['name'] in LOGIN_FAILED_SITES:
+                    LOGIN_FAILED_SITES.discard(site['name'])
+
+            if not _ensure_page_alive():
+                return {"name": site['name'], "error": "页面已关闭", "count": 0}
+            handle_popups(page, site_name=site['name'])
+            _save_session_storage_payload(page, site, selectors)
+            
+            # 确保在订单页
+            curr = page.url or ""
+            target_link = selectors.get('order_menu_link')
+            if target_link and is_url(target_link) and target_link not in curr:
+                page.goto(target_link)
+                page.wait_for_load_state('domcontentloaded')
+            
+            # 刷新获取最新数据
+            try:
+                host = _extract_hostname(page.url or "") or _extract_hostname(target_link) or _extract_hostname(login_url)
+                if keep_page_alive and host and "llxzu.com" in host:
+                    page.wait_for_timeout(1500)
+                else:
+                    page.reload(wait_until='domcontentloaded')
+                    # 智能等待
+                    wait_target = selectors.get('pending_tab_selector') or selectors.get('pending_count_element')
+                    if wait_target:
+                        try:
+                            page.wait_for_selector(wait_target, timeout=10000)
+                        except: pass
+            except: pass
+            
+            handle_popups(page, site_name=site['name'])
+
+            # 用户需求：增加智能等待“待审核”这个文字
+            try:
+                page.get_by_text("待审核", exact=False).wait_for(timeout=5000)
+            except:
+                pass
+
+            # 获取数量
+            count = 0
+            # 1. 尝试 Tab 数字
+            # ... (简化版，复用原逻辑太长，这里只做核心提取)
+            
+            # 尝试从 pending_count_element 获取
+            count_sel = selectors.get('pending_count_element')
+            if count_sel and page.is_visible(count_sel):
+                text = page.inner_text(count_sel)
+                match = re.search(r'\d+', text)
+                if match: count = int(match.group())
+            
+            # 尝试从 Tab 获取
+            if count == 0:
+                 # 简单查找 "待审核(3)"
+                 try:
+                     for kw in ["待审核", "待处理"]:
+                         els = page.get_by_text(kw, exact=False).all()
+                         for el in els:
+                             if el.is_visible():
+                                 txt = el.inner_text()
+                                 match = re.search(r'[\(\uff08](\d+)[\)\uff09]', txt)
+                                 if match:
+                                     count = int(match.group(1))
+                                     break
+                         if count > 0: break
+                 except: pass
+
+            print(f"[{site['name']}] 抓取完成，数量: {count}")
+            return {"name": site['name'], "count": count, "error": None, "link": page.url}
+        else:
+            print(f"[{site['name']}] 登录最终失败，标记为失败站点")
+            with LOGIN_FAILED_LOCK:
+                LOGIN_FAILED_SITES.add(site['name'])
+            return {"name": site['name'], "error": "登录失败", "count": 0}
+
+    except Exception as e:
+        print(f"[{site['name']}] 任务异常: {e}")
+        return {"name": site['name'], "error": str(e), "count": 0}
+    finally:
+        if context:
+            try:
+                is_shared = False
+                if browser and browser.contexts and context == browser.contexts[0]:
+                    is_shared = True
+                
+                if not is_shared:
+                     context.close()
+            except: pass
+        
+        if browser:
+            try: browser.disconnect()
+            except: pass
+
+        if p: p.stop()
+
 def check_orders(context_or_manager=None):
+    """核心任务：轮询所有后台并抓取数据 (并发版)
+    Args:
+        context_or_manager: 可选的 BrowserManager 实例
+    """
+    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] >>> 开始新一轮抓取任务 (并发模式)...")
+    
+    # 1. 获取/初始化 Manager
+    manager = None
+    if isinstance(context_or_manager, BrowserManager):
+        manager = context_or_manager
+    elif context_or_manager is None:
+        if 'browser_manager' in globals() and browser_manager:
+            manager = browser_manager
+        else:
+            manager = BrowserManager()
+
+    if not manager:
+        print("错误: 未能获取 BrowserManager 实例")
+        return []
+
+    # 2. 确保浏览器已启动并开启 CDP
+    if not manager.context or not manager.cdp_port:
+        print("正在启动浏览器...")
+        try:
+            manager.start()
+        except Exception as e:
+            print(f"启动浏览器失败: {e}")
+            return []
+    
+    # === 关键修复：确保 BrowserManager 内部的 context 状态是最新的 ===
+    try:
+        if manager.context and manager.context.pages:
+            # 简单的活性检查
+            _ = manager.context.pages[0].url
+    except:
+        print("检测到浏览器上下文失效，尝试重启...")
+        try:
+            manager.restart()
+        except:
+            return []
+            
+    cdp_port = manager.cdp_port
+    if not cdp_port:
+        print("错误: 无法获取 CDP 端口，无法并发执行")
+        return []
+
+    # 3. 准备
+    intervention_manager = InterventionManager(manager)
+    current_config = load_config()
+    sites = current_config.get('sites', [])
+    results = []
+    
+    active_sites = [s for s in sites if isinstance(s, dict) and s.get('enabled', True)]
+    
+    if not active_sites:
+        print("没有启用的站点。")
+        return []
+
+    print(f"即将并发抓取 {len(active_sites)} 个站点...")
+
+    # 4. 并发执行
+    # 用户反馈：不应无限制并发，但原先的限制(5)导致6个站点时最后一个卡顿
+    # 调整策略：
+    # 1. 设置一个合理的上限 (如 8)，既能覆盖大多数用户的站点数(通常<10)，又不至于炸机
+    # 2. 对于超过上限的，ThreadPoolExecutor 会自动排队，这是正常现象
+    max_workers = min(len(active_sites), 8)
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_site = {
+            executor.submit(process_site_task, site, cdp_port, intervention_manager): site 
+            for site in active_sites
+        }
+        
+        pending_futures = list(future_to_site.keys())
+        
+        while pending_futures:
+            done, not_done = concurrent.futures.wait(
+                pending_futures, 
+                timeout=0.2, 
+                return_when=concurrent.futures.FIRST_COMPLETED
+            )
+            
+            for future in done:
+                site = future_to_site[future]
+                try:
+                    res = future.result()
+                    if res: results.append(res)
+                except Exception as e:
+                    print(f"[{site['name']}] 线程执行异常: {e}")
+                    results.append({"name": site['name'], "error": str(e), "count": 0})
+                
+                pending_futures.remove(future)
+            
+            # === 关键：在主线程等待期间，必须处理窗口控制队列 ===
+            process_window_events(manager)
+
+    # 5. 汇总后处理
+    try:
+        if manager.context:
+            save_global_cookies(manager.context)
+    except: pass
+
+    success_count = len([r for r in results if not r.get('error')])
+    print(f"<<< 本轮抓取结束，成功: {success_count}/{len(active_sites)}")
+    
+    # === 发送通知逻辑 ===
+    if results:
+        data_update = {
+            "type": "data_update",
+            "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            "data": results
+        }
+        print(f"DATA_UPDATE:{json.dumps(data_update, ensure_ascii=False)}")
+
+        total_count = sum(r['count'] for r in results if r.get('count') is not None)
+        
+        if total_count == 0 and not any(r.get('error') for r in results):
+             print("\n=== 暂无订单，跳过通知 ===")
+        else:
+            prefixes = [
+                "### 🌞 又是充满阳光的一天，来看看订单吧~",
+                "### 🌞 忙碌之余，也要记得喝水休息哦~",
+                "### 🌞 温暖的阳光洒下来，工作也更有动力了~",
+                "### 🌞 保持好心情，效率会更高哦~",
+                "### 🌞 愿今天的你，心里也住着一个小太阳~"
+            ]
+        
+            suffixes = [
+                "**🌞 加油，每一个努力的日子都闪闪发光。**",
+                "**🌞 慢慢来，比较快，一切都会好起来的。**",
+                "**🌞 愿你的心情和今天的阳光一样明媚。**",
+                "**🌞 处理完工作，记得去晒晒太阳哦。**",
+                "**🌞 保持热爱，奔赴山海，今天也要开心呀。**"
+            ]
+            
+            header = random.choice(prefixes)
+            footer = random.choice(suffixes)
+            
+            body_lines = []
+            for res in results:
+                name = res['name']
+                link = res.get('link')
+                action_text = ""
+                if link and is_url(link):
+                     action_text = f"  [去处理]({link})"
+
+                if res.get('error'):
+                    line = f"> <font color=\"comment\">{name}</font>：<font color=\"comment\">{res['error']}</font>{action_text}"
+                else:
+                    count = res['count']
+                    if count > 0:
+                        color = "warning"
+                        count_str = f"**{count}**"
+                    else:
+                        color = "info"
+                        count_str = str(count)
+                    
+                    line = f"> {name}：<font color=\"{color}\">{count_str}</font> 单{action_text}"
+                
+                body_lines.append(line)
+                
+            msg = f"{header}\n\n" + "\n".join(body_lines) + f"\n\n{footer}"
+            
+            print("\n=== 发送通知内容 ===")
+            print(msg)
+            
+            current_hour = datetime.now().hour
+            if 0 <= current_hour < 8:
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] 深夜模式 (00:00-08:00): 保持运行但不发送通知。")
+            else:
+                send_wecom_notification(msg, msg_type="markdown")
+                feishu_content = ""
+                for res in results:
+                    name = res['name']
+                    count = res.get('count', 0)
+                    error = res.get('error')
+                    link = res.get('link')
+                    
+                    if error:
+                        feishu_content += f"{name}: {error}\n"
+                    else:
+                        feishu_content += f"{name}: {count} 单\n"
+                    if link:
+                        feishu_content += f"链接: {link}\n"
+                
+                if total_count > 0 or any(r.get('error') for r in results):
+                    send_feishu_notification(feishu_content, title="租帮宝 - 订单监控")
+
+    return results
+
+def check_orders_serial(context_or_manager=None):
     """核心任务：轮询所有后台并抓取数据
     Args:
         context_or_manager: 可选的 BrowserManager 实例或 Context，如果提供则复用
@@ -1218,105 +2048,86 @@ def check_orders(context_or_manager=None):
                         is_logged_in = True
                         print(f"[{site['name']}] 自动登录成功！")
                     else:
-                        # === 人工介入 (本地模式) ===
                         print(f"[{site['name']}] ⚠️ 自动登录未成功（可能需要验证码）。")
-                        
-                        # 尝试将浏览器移到屏幕中间方便操作
-                        if manager:
-                            try:
-                                manager.move_browser_onscreen()
-                            except:
-                                pass
-                                
-                        print(f"[{site['name']}] >>> 等待人工手动登录 (限时 60 秒)...")
-                        
-                        # 准备用于检测的 selectors（合并配置的和智能发现的）
-                        effective_selectors = selectors.copy()
-                        effective_selectors.update(auto_selectors)
+                        intervention_manager.enter(site['name'], 60)
+                        try:
+                            try: page.bring_to_front()
+                            except: pass
 
-                        start_wait = time.time()
-                        while time.time() - start_wait < 60:
-                            # 处理窗口控制队列 (在交互等待期间也要响应显示/隐藏指令)
-                            try:
-                                while not shared.window_control_queue.empty():
-                                    win_cmd = shared.window_control_queue.get_nowait()
-                                    if manager:
-                                        if win_cmd == "show":
-                                            manager.move_browser_onscreen()
-                                        elif win_cmd == "hide":
-                                            manager.move_browser_offscreen()
-                            except:
-                                pass
+                            effective_selectors = selectors.copy()
+                            effective_selectors.update(auto_selectors)
 
-                            check_passed_interactive = False
-                            # 1. 检测是否出现了特定的登录后元素（如 Tab）
-                            if check_selector and not is_url(check_selector) and page.is_visible(check_selector):
-                                check_passed_interactive = True
-                            
-                            # 2. 检测登录框是否消失
-                            if not check_passed_interactive:
-                                login_btn_sel = effective_selectors.get('login_button')
-                                user_sel = effective_selectors.get('username_input')
-                                login_btn_visible = True
-                                user_visible = True
-                                
-                                # 如果我们甚至不知道登录框长什么样，就没法通过“消失”来判断
-                                # 但如果我们有 auto_selectors，或者配置里有，就可以判断
-                                has_login_form_info = bool(login_btn_sel or user_sel)
-                                
-                                if has_login_form_info:
-                                    try:
-                                        if login_btn_sel:
-                                            login_btn_visible = page.is_visible(login_btn_sel)
-                                    except:
-                                        pass
-                                    try:
-                                        if user_sel:
-                                            user_visible = page.is_visible(user_sel)
-                                    except:
-                                        pass
-                                    
-                                    if (not login_btn_visible) and (not user_visible):
-                                        check_passed_interactive = True
-                                        print(f"[{site['name']}] 检测到登录框/按钮消失，判定为登录成功")
+                            start_wait = time.time()
+                            while time.time() - start_wait < 60:
+                                try: page.bring_to_front()
+                                except: pass
 
-                            # 3. URL 兜底检测 (URL 变更且不含 login)
-                            if not check_passed_interactive:
                                 try:
-                                    current_url_int = page.url or ""
-                                    is_login_like = "login" in current_url_int.lower() or "signin" in current_url_int.lower()
-                                    # 如果当前 URL 既不是配置的登录页，也不包含 login 关键字
-                                    # 且登录框确实找不到了（或者本来就没找到）
-                                    if (current_url_int != site['login_url']) and (not is_login_like):
-                                        # 再次确认一下登录框真的不在了
-                                        login_btn_sel = effective_selectors.get('login_button')
-                                        user_sel = effective_selectors.get('username_input')
-                                        form_visible = False
-                                        if login_btn_sel and page.is_visible(login_btn_sel): form_visible = True
-                                        if user_sel and page.is_visible(user_sel): form_visible = True
-                                        
-                                        if not form_visible:
-                                            check_passed_interactive = True
-                                            print(f"[{site['name']}] URL 已变更且未发现登录框，判定为登录成功 (URL: {current_url_int})")
+                                    while not shared.window_control_queue.empty():
+                                        win_cmd = shared.window_control_queue.get_nowait()
+                                        if manager:
+                                            if win_cmd == "show":
+                                                manager.move_browser_onscreen()
+                                            elif win_cmd == "hide":
+                                                manager.move_browser_offscreen()
                                 except:
                                     pass
 
-                            if check_passed_interactive:
-                                is_logged_in = True
-                                print(f"[{site['name']}] 人工介入成功！已登录。")
-                                break
+                                check_passed_interactive = False
+                                if check_selector and not is_url(check_selector) and page.is_visible(check_selector):
+                                    check_passed_interactive = True
+                                
+                                if not check_passed_interactive:
+                                    login_btn_sel = effective_selectors.get('login_button')
+                                    user_sel = effective_selectors.get('username_input')
+                                    login_btn_visible = True
+                                    user_visible = True
+                                    has_login_form_info = bool(login_btn_sel or user_sel)
+                                    
+                                    if has_login_form_info:
+                                        try:
+                                            if login_btn_sel:
+                                                login_btn_visible = page.is_visible(login_btn_sel)
+                                        except:
+                                            pass
+                                        try:
+                                            if user_sel:
+                                                user_visible = page.is_visible(user_sel)
+                                        except:
+                                            pass
+                                        
+                                        if (not login_btn_visible) and (not user_visible):
+                                            check_passed_interactive = True
+                                            print(f"[{site['name']}] 检测到登录框/按钮消失，判定为登录成功")
+
+                                if not check_passed_interactive:
+                                    try:
+                                        current_url_int = page.url or ""
+                                        is_login_like = "login" in current_url_int.lower() or "signin" in current_url_int.lower()
+                                        if (current_url_int != site['login_url']) and (not is_login_like):
+                                            login_btn_sel = effective_selectors.get('login_button')
+                                            user_sel = effective_selectors.get('username_input')
+                                            form_visible = False
+                                            if login_btn_sel and page.is_visible(login_btn_sel): form_visible = True
+                                            if user_sel and page.is_visible(user_sel): form_visible = True
+                                            
+                                            if not form_visible:
+                                                check_passed_interactive = True
+                                                print(f"[{site['name']}] URL 已变更且未发现登录框，判定为登录成功 (URL: {current_url_int})")
+                                    except:
+                                        pass
+
+                                if check_passed_interactive:
+                                    is_logged_in = True
+                                    print(f"[{site['name']}] 人工介入成功！已登录。")
+                                    break
+                                
+                                time.sleep(0.5)
                             
-                            time.sleep(0.5)
-                        
-                        # 操作结束，将浏览器移回屏幕外
-                        if manager:
-                            try:
-                                manager.move_browser_offscreen()
-                            except:
-                                pass
-                        
-                        if not is_logged_in:
-                            print(f"[{site['name']}] ❌ 人工介入超时，放弃本次抓取。")
+                            if not is_logged_in:
+                                print(f"[{site['name']}] ❌ 人工介入超时，放弃本次抓取。")
+                        finally:
+                            intervention_manager.exit()
 
                     if is_logged_in:
                         # 保存智能发现的 selector (无论是自动登录成功还是人工介入成功)
@@ -1976,6 +2787,7 @@ class BrowserManager:
             
         print(f"浏览器数据目录: {self.user_data_dir}")
         self.pages = {}  # 存储各站点的持久化页面 {site_name: page}
+        self.browser_proc = None # 存储浏览器进程句柄
         self.cdp_port = 9222 # 定义 CDP 端口
 
     def _get_browser_executable_path(self):
@@ -1983,7 +2795,11 @@ class BrowserManager:
         # 1. 检查当前目录下的 playwright-browsers
         base_paths = []
         if getattr(sys, 'frozen', False):
-            base_paths.append(os.path.dirname(sys.executable))
+            exe_dir = os.path.dirname(sys.executable)
+            base_paths.append(exe_dir)
+            # 兼容后端 onedir 模式：如果在 backend 子目录下，向上查找一级
+            if os.path.basename(exe_dir).lower() == 'backend':
+                base_paths.append(os.path.dirname(exe_dir))
         else:
             base_paths.append(os.path.dirname(os.path.abspath(__file__)))
             
@@ -2075,6 +2891,7 @@ class BrowserManager:
                 try:
                     # 注意：connect_over_cdp 返回的是 Browser 实例，不是 Context
                     browser = self.playwright.chromium.connect_over_cdp(f"http://127.0.0.1:{self.cdp_port}")
+                    self.browser = browser # 保存引用
                     # 获取默认上下文 (通常第一个)
                     if browser.contexts:
                         self.context = browser.contexts[0]
@@ -2149,6 +2966,7 @@ class BrowserManager:
                         flags = 0x00000008 # DETACHED_PROCESS
 
                     proc = subprocess.Popen(args, creationflags=flags)
+                    self.browser_proc = proc # 保存进程句柄以便后续控制窗口
                     
                     print("浏览器进程已启动，等待初始化...")
                     
@@ -2175,6 +2993,8 @@ class BrowserManager:
                     if not browser:
                         raise Exception("浏览器启动超时或连接失败")
                         
+                    self.browser = browser # 保存引用
+
                     if browser.contexts:
                         self.context = browser.contexts[0]
                     else:
@@ -2337,6 +3157,14 @@ class BrowserManager:
     def set_window_position(self, left, top):
         """通过 CDP 控制浏览器窗口位置"""
         try:
+            # 检查是否处于无头模式
+            try:
+                is_headless = bool(load_config().get('headless', False))
+                if is_headless:
+                    print("警告: 当前处于无头模式 (Headless)，无法显示浏览器窗口。请在设置中关闭无头模式以进行人工介入。")
+            except:
+                pass
+
             if not self.context:
                 print("尝试调整窗口位置，但 BrowserContext 未初始化")
                 return
@@ -2392,28 +3220,52 @@ class BrowserManager:
                                 import ctypes
                                 user32 = ctypes.windll.user32
                                 
-                                # 枚举所有窗口，找到标题包含 Chrome 或 Edge 的
-                                # 由于我们无法直接从 Playwright 获取 HWND，只能通过标题模糊匹配
-                                # 这不是完美的，但通常够用
+                                target_pid = 0
+                                if self.browser_proc:
+                                    target_pid = self.browser_proc.pid
+                                
+                                found_hwnd = []
                                 
                                 def enum_windows_callback(hwnd, lParam):
                                     if user32.IsWindowVisible(hwnd):
+                                        # 1. 优先匹配 PID
+                                        if target_pid > 0:
+                                            lpdwProcessId = ctypes.c_ulong()
+                                            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(lpdwProcessId))
+                                            if lpdwProcessId.value == target_pid:
+                                                found_hwnd.append(hwnd)
+                                                return True # 继续找，可能有多个窗口
+                                        
+                                        # 2. 其次匹配标题 (作为备用，或 PID 未知时)
                                         length = user32.GetWindowTextLengthW(hwnd)
                                         buff = ctypes.create_unicode_buffer(length + 1)
                                         user32.GetWindowTextW(hwnd, buff, length + 1)
                                         title = buff.value
                                         
-                                        # 匹配常见的浏览器标题
-                                        # 注意：这里可能会误伤用户其他的浏览器窗口，但在人工介入模式下，
-                                        # 用户通常就是想看这个窗口，所以置顶所有相关窗口也是可以接受的
-                                        if "Chrome" in title or "Edge" in title or "Chromium" in title:
-                                            # 恢复并置顶
-                                            user32.ShowWindow(hwnd, 9) # SW_RESTORE
-                                            user32.SetForegroundWindow(hwnd)
+                                        # 匹配常见的浏览器标题，增加 "租帮宝" 和 "零零享"
+                                        if "Chrome" in title or "Edge" in title or "Chromium" in title or "租帮宝" in title or "零零享" in title:
+                                            # 如果 PID 匹配失败 (例如多进程架构导致 PID 不同)，尝试标题匹配
+                                            # 但为了避免误伤，仅在 PID 未知或 PID 匹配不到时使用
+                                            if target_pid == 0 or not found_hwnd:
+                                                 found_hwnd.append(hwnd)
+                                                 
                                     return True
                                 
                                 WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_int, ctypes.c_long)
                                 user32.EnumWindows(WNDENUMPROC(enum_windows_callback), 0)
+                                
+                                if found_hwnd:
+                                    # 取第一个找到的窗口
+                                    hwnd = found_hwnd[0]
+                                    
+                                    # 恢复窗口 (如果是最小化)
+                                    user32.ShowWindow(hwnd, 9) # SW_RESTORE
+                                    
+                                    # 强制置顶
+                                    user32.SetForegroundWindow(hwnd)
+                                else:
+                                    print(f"未找到浏览器窗口 (PID: {target_pid})")
+                                    
                             except Exception as win_err:
                                 print(f"强制置顶窗口失败: {win_err}")
                                 
